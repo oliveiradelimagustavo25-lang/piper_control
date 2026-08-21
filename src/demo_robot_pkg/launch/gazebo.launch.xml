@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+
+<launch>
+
+    <arg 
+        name="robot_model" 
+        default="$(find-pkg-share demo_robot_pkg)/urdf/gazebo_piper_description.xacro" 
+        description="机器人模型路径"/>
+
+
+    <node pkg="robot_state_publisher" exec="robot_state_publisher">
+        <param 
+            name="robot_description"
+            value="$(command 'xacro $(var robot_model)')" 
+            type="str"/>  <!--如果是xacro文件就用'xacro $(var robot_model)'-->
+    </node>
+    
+    <node 
+        pkg="joint_state_publisher_gui" 
+        exec="joint_state_publisher_gui"/>
+
+
+</launch>

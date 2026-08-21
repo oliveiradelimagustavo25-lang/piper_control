@@ -1,0 +1,72 @@
+<?xml version="1.0"?>
+
+<sdf version="1.6">
+
+    <model name="aruco_board">
+
+
+    <static>false</static>
+
+
+    <link name="board">
+
+
+    <visual name="visual">
+
+
+        <geometry>
+
+            <box>
+
+                <size>
+                0.2 0.01 0.2
+                </size>
+
+            </box>
+
+        </geometry>
+
+
+        <material>
+
+        <script>
+
+            <uri>
+                model://aruco_board/materials/textures
+            </uri>
+
+            <name>
+                marker
+            </name>
+
+        </script>
+
+        </material>
+
+
+    </visual>
+
+
+    <collision name="collision">
+
+            <geometry>
+
+                <box>
+
+                    <size>
+                        0.2 0.01 0.2
+                    </size>
+
+                </box>
+
+            </geometry>
+
+    </collision>
+
+
+    </link>
+
+
+    </model>
+
+</sdf>

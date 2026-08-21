@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="piper">
+    
+    <!--xacro文件也可以直接引入urdf文件，且不用解析宏-->
+    <!-- Import piper urdf file -->
+    <xacro:include filename="$(find demo_robot_pkg)/urdf/piper_description.urdf" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="$(find demo_robot_pkg)/urdf/gazebo_piper.ros2_control.urdf" />
+
+    <xacro:include filename="$(find demo_robot_pkg)/urdf/sensor_plugin/camera.xacro" />
+
+    <xacro:gazebo_sensor_plugin />
+
+</robot>

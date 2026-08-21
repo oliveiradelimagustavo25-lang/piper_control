@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+
+<launch>
+
+    <arg 
+        name="robot_model" 
+        default="$(find-pkg-share demo_robot_pkg)/urdf/piper_description.urdf" 
+        description="机器人模型路径"/>
+
+
+    <node pkg="robot_state_publisher" exec="robot_state_publisher">
+        <param 
+            name="robot_description"
+            value="$(command 'cat $(var robot_model)')" 
+            type="str"/>  <!--如果是xacro文件就用'xacro $(var robot_model)'-->
+    </node>
+
+    <node 
+        pkg="joint_state_publisher_gui" 
+        exec="joint_state_publisher_gui"/>
+
+<!--
+    <node 
+        pkg="rviz2"
+        exec="rviz2"
+        output="screen"
+        args="-d $(find-pkg-share demo_robot_pkg)/rviz/rviz_config.rviz"/>
+-->
+
+</launch>
