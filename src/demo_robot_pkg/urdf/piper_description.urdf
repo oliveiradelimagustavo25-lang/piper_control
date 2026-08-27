@@ -600,13 +600,15 @@
           <origin xyz="-0.031 -0.028 0.0018" rpy="0.0 -1.22 0.0"/>
           <parent link="camera_stand_link"/>
           <child link="d435_camera_link"/>
-        </joint>
+      </joint>
+
       <link name="camera_bottom_screw_frame"/>
-        <joint name="camera_joint" type="fixed">
+      <joint name="camera_joint" type="fixed">
           <origin rpy="0 0 0" xyz="0 0 0"/>
           <parent link="d435_camera_link"/>
           <child link="camera_bottom_screw_frame"/>
-        </joint>
+      </joint>
+
     <link name="camera_link">
       <visual>
         <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0.0043 -0.0175 0"/>
@@ -626,9 +628,16 @@
         <inertia ixx="0.00003881243" ixy="0.0" ixz="0.0" iyy="0.0000498940" iyz="0.0" izz="0.00003879257"/>
       </inertial>
     </link>
-     <joint name="camera_link_joint" type="fixed">
+    <joint name="camera_link_joint" type="fixed">
       <origin rpy="0 0 0" xyz="0.011 0.0175 0.0125"/>
       <parent link="camera_bottom_screw_frame"/>
       <child link="camera_link"/>
+    </joint>
+
+    <link name="camera_optical_link"/>
+    <joint name="camera_optical_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="-1.57079632679 0 -1.57079632679"/>
+      <parent link="camera_link"/>
+      <child link="camera_optical_link"/>
     </joint>
 </robot>

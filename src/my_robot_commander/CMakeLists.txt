@@ -21,12 +21,14 @@ find_package(tf2_ros REQUIRED)
 
 add_executable(commander src/commander.cpp)
 add_executable(camera_image src/camera_image.cpp)
+add_executable(camera_depth src/camera_depth)
 
 ament_target_dependencies(commander moveit_ros_planning_interface rclcpp example_interfaces my_robot_interface)
 ament_target_dependencies(camera_image rclcpp cv_bridge sensor_msgs OpenCV geometry_msgs tf2 tf2_ros)
+ament_target_dependencies(camera_depth rclcpp cv_bridge sensor_msgs OpenCV geometry_msgs)
 
 
-install(TARGETS  commander camera_image
+install(TARGETS  commander camera_image camera_depth
         DESTINATION lib/${PROJECT_NAME}
 
 )
