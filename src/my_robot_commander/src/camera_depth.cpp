@@ -57,9 +57,9 @@ class CameraNode : public rclcpp::Node
 
 };
 
-int main(int agrc,char ** agrv)
+int main(int argc,char ** argv)
 {
-    rclcpp::init(agrc,agrv);
+    rclcpp::init(argc,argv);
     auto camera = std::make_shared<CameraNode>();
     rclcpp::spin(camera);
     rclcpp::shutdown();

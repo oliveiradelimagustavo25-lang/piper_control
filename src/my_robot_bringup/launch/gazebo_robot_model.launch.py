@@ -12,6 +12,7 @@ def generate_launch_description():
     robot_description_package_name = "demo_robot_pkg"
 
     robot_description_package_path = get_package_share_directory(robot_description_package_name)
+    aruco_package_path = get_package_share_directory("my_aruco_pkg")
     default_gazebo_world_path = os.path.join(robot_description_package_path,"world","room.world")
     gazebo_launch_path = os.path.join(get_package_share_directory("gazebo_ros"), "launch", "gazebo.launch.py")
     #moveit_launch_path = os.path.join(get_package_share_directory("my_robot_moveit_pkg"), "launch", "move_group.launch.py")
@@ -35,7 +36,7 @@ def generate_launch_description():
         description="加载model.xacro路径"
     )
 
-    robot_desctiption = ParameterValue(
+    robot_description = ParameterValue(
         launch.substitutions.Command(
             [
                 "xacro ",
@@ -52,11 +53,28 @@ def generate_launch_description():
     action_robot_state_publisher = launch_ros.actions.Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
-        parameters=[{"robot_description": robot_desctiption, "use_sim_time": True}],
+        parameters=[{"robot_description": robot_description, "use_sim_time": True}],
         output="screen"
     )
 
-    environment_variable = SetEnvironmentVariable("GAZEBO_MODEL_PATH",os.path.join(get_package_prefix(robot_description_package_name), "share"))
+    gazebo_model_path = os.pathsep.join([
+        "/usr/share/gazebo-11/models",
+        os.path.join(get_package_prefix(robot_description_package_name), "share"),
+        aruco_package_path,
+        os.environ.get("GAZEBO_MODEL_PATH", ""),
+    ])
+
+    environment_variable = SetEnvironmentVariable("GAZEBO_MODEL_PATH", gazebo_model_path)
+
+    gazebo_resource_path = os.pathsep.join([
+        "/usr/share/gazebo-11",
+        aruco_package_path,
+        os.environ.get("GAZEBO_RESOURCE_PATH", ""),
+    ])
+
+    resource_environment_variable = SetEnvironmentVariable(
+        "GAZEBO_RESOURCE_PATH", gazebo_resource_path)
+    
     disable_gazebo_model_database = SetEnvironmentVariable(name="GAZEBO_MODEL_DATABASE_URI",value="")
 
     pkg_share=os.pathsep+os.path.join(get_package_prefix(robot_description_package_name), "share")
@@ -80,6 +98,22 @@ def generate_launch_description():
             executable="spawn_entity.py",
             arguments=["-topic", "/robot_description", "-entity", "piper"],
             output="screen"
+    )
+
+    action_spawn_marker = launch_ros.actions.Node(
+        package="gazebo_ros",
+        executable="spawn_entity.py",
+        arguments=[
+            "-entity", "marker0",
+            "-file", os.path.join(aruco_package_path, "aruco_model", "model.sdf"),
+            "-x", "0.5",
+            "-y", "0.1",
+            "-z", "0.25",
+            "-Y", "1.57",
+            "-P", "0.0",
+            "-R", "0.0"
+        ],
+        output="screen",
     )
     
     
@@ -182,10 +216,12 @@ def generate_launch_description():
         gui_arg,
         use_rviz_arg,
         environment_variable,
+        resource_environment_variable,
         disable_gazebo_model_database,
         action_robot_state_publisher,
         action_launch_gazebo,
         action_spawn_entity,
+        action_spawn_marker,
         start_controllers_after_spawn,
         action_launch_move_group,
         action_rviz,  

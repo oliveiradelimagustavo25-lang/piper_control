@@ -93,9 +93,11 @@ class Commander
                 {
                     arm_->execute(trajectory);
                 }
+                else
+                {
+                    RCLCPP_ERROR(node_->get_logger(), "Cartesian path incomplete: %.1f%%", fraction * 100.0);
+                }
             }
-            
-            PlanAndExecute(arm_);       
         }
 
         void PlanAndExecute(std::shared_ptr<moveit::planning_interface::MoveGroupInterface> group)
@@ -105,6 +107,10 @@ class Commander
             if(group->plan(arm_plan) == moveit::core::MoveItErrorCode::SUCCESS)
             {
                 group->execute(arm_plan);
+            }
+            else
+            {
+                RCLCPP_ERROR(node_->get_logger(), "MoveIt failed to plan a path to the requested target");
             }
         }
 
@@ -147,6 +153,11 @@ class Commander
         }
         void PoseCmdCallback(const RobotPoseinterface& msg)
         {
+            if (msg.position.size() != 3 || msg.radian.size() != 3)
+            {
+                RCLCPP_ERROR(node_->get_logger(), "pose_command requires exactly 3 position and 3 radian values");
+                return;
+            }
             GoToPoseTarget(msg.position.data(), msg.radian.data(),msg.cartesian);
         }
 };

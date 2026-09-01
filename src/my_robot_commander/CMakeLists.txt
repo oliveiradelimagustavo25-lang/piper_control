@@ -17,18 +17,29 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 
 add_executable(commander src/commander.cpp)
 add_executable(camera_image src/camera_image.cpp)
-add_executable(camera_depth src/camera_depth)
+add_executable(camera_depth src/camera_depth.cpp)
+add_executable(camera_move_arm src/camera_move_arm.cpp)
 
 ament_target_dependencies(commander moveit_ros_planning_interface rclcpp example_interfaces my_robot_interface)
 ament_target_dependencies(camera_image rclcpp cv_bridge sensor_msgs OpenCV geometry_msgs tf2 tf2_ros)
 ament_target_dependencies(camera_depth rclcpp cv_bridge sensor_msgs OpenCV geometry_msgs)
+ament_target_dependencies(camera_move_arm
+  rclcpp
+  my_robot_interface
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+  std_srvs
+)
 
 
-install(TARGETS  commander camera_image camera_depth
+install(TARGETS  commander camera_image camera_depth camera_move_arm
         DESTINATION lib/${PROJECT_NAME}
 
 )

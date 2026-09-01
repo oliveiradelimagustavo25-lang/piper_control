@@ -4,9 +4,11 @@ material marker
     {
         pass
         {
+            lighting off
             texture_unit
             {
                 texture marker_0.png
+                filtering none
             }
         }
     }

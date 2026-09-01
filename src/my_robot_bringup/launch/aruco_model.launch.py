@@ -15,6 +15,7 @@ def generate_launch_description():
     pitch_arg = DeclareLaunchArgument("pitch",default_value="0.0")
     yaw_arg = DeclareLaunchArgument("yaw",default_value="1.57")
     roll_arg = DeclareLaunchArgument("roll",default_value="0.0")
+    label_arg = DeclareLaunchArgument("label",default_value="0")
 
     x=launch.substitutions.LaunchConfiguration("x")
     y=launch.substitutions.LaunchConfiguration("y")
@@ -24,11 +25,13 @@ def generate_launch_description():
     yaw=launch.substitutions.LaunchConfiguration("yaw")
     roll=launch.substitutions.LaunchConfiguration("roll")
 
+    label =launch.substitutions.LaunchConfiguration("label")
+
     action_spawn_entity = launch_ros.actions.Node(  #使用spawn_entity节点，调用/gazebo的服务端，加载模型进入gazeboservice整体引擎
             package="gazebo_ros",
             executable="spawn_entity.py",
             arguments=[
-                "-entity","marker",
+                "-entity",["marker", label],
 
                 "-database","aruco_board",
 
@@ -51,6 +54,7 @@ def generate_launch_description():
         pitch_arg,
         yaw_arg,
         roll_arg,
+        label_arg,
         action_spawn_entity,
        
     ])

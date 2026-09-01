@@ -5,7 +5,8 @@
     <model name="aruco_board">
 
 
-    <static>false</static>
+    <!-- Keep the target fixed so it cannot fall before the camera detects it. -->
+    <static>true</static>
 
 
     <link name="board">
@@ -32,7 +33,11 @@
         <script>
 
             <uri>
-                model://aruco_board/materials/textures
+                file://aruco_model/materials/scripts/marker.material
+            </uri>
+
+            <uri>
+                file://aruco_model/materials/textures
             </uri>
 
             <name>
