@@ -165,11 +165,24 @@ class Commander
 int main(int argc,char** argv)
 {
     rclcpp::init(argc,argv);
-    auto node = std::make_shared<rclcpp::Node>("commander");
-    auto commmand = Commander(node);
-
-    rclcpp::spin(node);
+    try
+    {
+        auto node = std::make_shared<rclcpp::Node>(
+            "commander", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+        auto commander = Commander(node);
+        RCLCPP_INFO(node->get_logger(), "Commander ready");
+        rclcpp::spin(node);
+    }
+    catch (const std::exception & error)
+    {
+        // 初始化等待期间被用户关闭时，不将正常退出当成未捕获异常。
+        if (rclcpp::ok())
+        {
+            RCLCPP_ERROR(rclcpp::get_logger("commander"), "%s", error.what());
+            rclcpp::shutdown();
+            return 1;
+        }
+    }
     rclcpp::shutdown();
-    
     return 0;
 }

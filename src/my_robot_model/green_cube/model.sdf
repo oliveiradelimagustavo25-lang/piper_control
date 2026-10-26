@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+
+<sdf version="1.6">
+
+    <model name="green_cube">
+
+
+    <!-- Dynamic 1 cm cube; nominal mass 1 g. -->
+    <static>false</static>
+
+
+    <link name="cube">
+        <inertial>
+            <mass>0.001</mass>
+            <!-- Uniform cube: Ixx = Iyy = Izz = mass * side^2 / 6. -->
+            <inertia>
+                <ixx>1.6666666667e-8</ixx>
+                <iyy>1.6666666667e-8</iyy>
+                <izz>1.6666666667e-8</izz>
+                <ixy>0</ixy>
+                <ixz>0</ixz>
+                <iyz>0</iyz>
+            </inertia>
+        </inertial>
+
+
+    <visual name="visual">
+
+
+        <geometry>
+
+            <box>
+
+                <size>
+                0.01 0.01 0.01
+                </size>
+
+            </box>
+
+        </geometry>
+
+
+        <material>
+
+
+        <!-- 环境光下的颜色 -->
+        <ambient>0 1 0 1</ambient>
+
+        <!-- 光照下的漫反射颜色 -->
+        <diffuse>0 1 0 1</diffuse>
+
+        <!-- 不添加镜面高光 -->
+        <specular>0 0 0 1</specular>
+
+        </material>
+
+
+    </visual>
+
+
+    <collision name="collision">
+
+            <geometry>
+
+                <box>
+
+                    <size>
+                        0.01 0.01 0.01
+                    </size>
+
+                </box>
+
+            </geometry>
+
+    </collision>
+
+
+    </link>
+
+
+    </model>
+
+</sdf>

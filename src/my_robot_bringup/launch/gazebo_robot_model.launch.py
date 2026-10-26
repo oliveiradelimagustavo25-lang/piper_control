@@ -1,230 +1,112 @@
-import launch
-import launch_ros
-from ament_index_python.packages import get_package_share_directory,get_package_prefix
 import os
-from launch.actions import DeclareLaunchArgument,SetEnvironmentVariable,RegisterEventHandler
+
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument, IncludeLaunchDescription, LogInfo,
+    RegisterEventHandler, SetEnvironmentVariable,
+)
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch_ros.parameter_descriptions import ParameterValue
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import Command, LaunchConfiguration
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from moveit_configs_utils import MoveItConfigsBuilder
 
+
 def generate_launch_description():
-    robot_description_package_name = "demo_robot_pkg"
-
-    robot_description_package_path = get_package_share_directory(robot_description_package_name)
-    aruco_package_path = get_package_share_directory("my_aruco_pkg")
-    default_gazebo_world_path = os.path.join(robot_description_package_path,"world","room.world")
-    gazebo_launch_path = os.path.join(get_package_share_directory("gazebo_ros"), "launch", "gazebo.launch.py")
-    #moveit_launch_path = os.path.join(get_package_share_directory("my_robot_moveit_pkg"), "launch", "move_group.launch.py")
-    moveit_config = MoveItConfigsBuilder("piper", package_name="my_robot_moveit_pkg").to_moveit_configs()
-
-    use_rviz_arg = DeclareLaunchArgument(
-            "use_rviz",
-            default_value="true",
-            description="Start RViz with the MoveIt plugin.",
-    )
-    
-    gui_arg = DeclareLaunchArgument(
-            "gui",
-            default_value="true",
-            description="Start the Gazebo client.",
-    )
-
-    robot_description_xacro_arg =DeclareLaunchArgument(
-        name="robot_model",
-        default_value=str(os.path.join(robot_description_package_path, "urdf", "gazebo_piper_description.xacro")),
-        description="加载model.xacro路径"
-    )
-
+    robot_path = get_package_share_directory('demo_robot_pkg')
+    model_path = get_package_share_directory('my_robot_model')
+    perception_path = get_package_share_directory('my_robot_perception')
+    moveit_config = MoveItConfigsBuilder(
+        'piper', package_name='my_robot_moveit_pkg').to_moveit_configs()
+    # 暂不启用模板中的 Kinect/OctoMap 配置。
+    moveit_config.sensors_3d = {}
     robot_description = ParameterValue(
-        launch.substitutions.Command(
-            [
-                "xacro ",
-                launch.substitutions.LaunchConfiguration("robot_model"),
-            ]
-        ),
-        value_type=str,
+        Command(['xacro ', LaunchConfiguration('robot_model')]), value_type=str)
+    robot_params = {
+        'robot_description': robot_description,
+        'use_sim_time': True,
+    }
+    moveit_params = [moveit_config.to_dict(), robot_params]
+
+    args = [
+        DeclareLaunchArgument('gui', default_value='true'),
+        DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument('robot_model', default_value=os.path.join(
+            robot_path, 'urdf', 'gazebo_piper_description.xacro')),
+        # 仅作用于本 launch 的子进程，不修改用户 Shell 配置。
+        DeclareLaunchArgument('rmw_implementation', default_value='rmw_fastrtps_cpp'),
+        DeclareLaunchArgument('localhost_only', default_value='1'),
+    ]
+    environment = [
+        SetEnvironmentVariable('RMW_IMPLEMENTATION', LaunchConfiguration('rmw_implementation')),
+        SetEnvironmentVariable('ROS_LOCALHOST_ONLY', LaunchConfiguration('localhost_only')),
+        SetEnvironmentVariable('GAZEBO_MODEL_PATH', os.pathsep.join(filter(None, [
+            '/usr/share/gazebo-11/models',
+            os.path.join(get_package_prefix('demo_robot_pkg'), 'share'),
+            model_path, os.environ.get('GAZEBO_MODEL_PATH', ''),
+        ]))),
+        SetEnvironmentVariable('GAZEBO_RESOURCE_PATH', os.pathsep.join(filter(None, [
+            '/usr/share/gazebo-11', model_path,
+            os.environ.get('GAZEBO_RESOURCE_PATH', ''),
+        ]))),
+        SetEnvironmentVariable('GAZEBO_MODEL_DATABASE_URI', ''),
+    ]
+    gazebo = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(
+            get_package_share_directory('gazebo_ros'), 'launch', 'gazebo.launch.py')),
+        launch_arguments={
+            'world': os.path.join(robot_path, 'world', 'room.world'),
+            'verbose': 'true', 'gui': LaunchConfiguration('gui'),
+        }.items(),
     )
-
-    gui = launch.substitutions.LaunchConfiguration("gui")
-    use_rviz = launch.substitutions.LaunchConfiguration("use_rviz")
-
-    
-    action_robot_state_publisher = launch_ros.actions.Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        parameters=[{"robot_description": robot_description, "use_sim_time": True}],
-        output="screen"
+    spawn = Node(
+        package='gazebo_ros', executable='spawn_entity.py', output='screen',
+        arguments=['-topic', '/robot_description', '-entity', 'piper', '-timeout', '60'],
     )
+    controllers = [
+        Node(package='controller_manager', executable='spawner', output='screen',
+             arguments=[name, '--controller-manager', '/controller_manager'])
+        for name in ['joint_state_broadcaster', 'arm_controller', 'gripper_controller']
+    ]
 
-    gazebo_model_path = os.pathsep.join([
-        "/usr/share/gazebo-11/models",
-        os.path.join(get_package_prefix(robot_description_package_name), "share"),
-        aruco_package_path,
-        os.environ.get("GAZEBO_MODEL_PATH", ""),
-    ])
+    def after_spawn(event, context):
+        # 生成失败时不继续启动控制器，保留最初的错误信息。
+        if event.returncode != 0:
+            return [LogInfo(msg='Piper spawn failed; controllers were not started.')]
+        return controllers
 
-    environment_variable = SetEnvironmentVariable("GAZEBO_MODEL_PATH", gazebo_model_path)
-
-    gazebo_resource_path = os.pathsep.join([
-        "/usr/share/gazebo-11",
-        aruco_package_path,
-        os.environ.get("GAZEBO_RESOURCE_PATH", ""),
-    ])
-
-    resource_environment_variable = SetEnvironmentVariable(
-        "GAZEBO_RESOURCE_PATH", gazebo_resource_path)
-    
-    disable_gazebo_model_database = SetEnvironmentVariable(name="GAZEBO_MODEL_DATABASE_URI",value="")
-
-    pkg_share=os.pathsep+os.path.join(get_package_prefix(robot_description_package_name), "share")
-    if "GAZEBO_MODEL_PATH" in os.environ:
-        os.environ["GAZEBO_MODEL_PATH"]+=pkg_share
-    else:
-        os.environ["GAZEBO_MODEL_PATH"] ="/usr/share/gazebo-11/models"+pkg_share
-    
-    
-     # 加载Gazebo世界模型
-    action_launch_gazebo = launch.actions.IncludeLaunchDescription(  #加载gazeboservice整体引擎进程(不是节点，只是一个run()的while循环)，运行世界模型；初始化使用gazebo_ros_init插件创建/gazebo子节点，使用executor.spin_more()运行/gazebo子节点，是世界模型与ros世界的关键
-            PythonLaunchDescriptionSource(
-                gazebo_launch_path,
-            ),
-            launch_arguments=[("world", default_gazebo_world_path), ("verbose", "true"),("gui", gui)]
-    )
-    
-        # Spawn Entity  
-    action_spawn_entity = launch_ros.actions.Node(  #使用spawn_entity节点，调用/gazebo的服务端，加载模型进入gazeboservice整体引擎
-            package="gazebo_ros",
-            executable="spawn_entity.py",
-            arguments=["-topic", "/robot_description", "-entity", "piper"],
-            output="screen"
-    )
-
-    action_spawn_marker = launch_ros.actions.Node(
-        package="gazebo_ros",
-        executable="spawn_entity.py",
-        arguments=[
-            "-entity", "marker0",
-            "-file", os.path.join(aruco_package_path, "aruco_model", "model.sdf"),
-            "-x", "0.5",
-            "-y", "0.1",
-            "-z", "0.25",
-            "-Y", "1.57",
-            "-P", "0.0",
-            "-R", "0.0"
-        ],
-        output="screen",
-    )
-    
-    
-    action_load_joint_state_controller = launch_ros.actions.Node(
-            package="controller_manager",
-            executable="spawner",
-            arguments=[
-                "joint_state_broadcaster",
-                "--controller-manager",
-                "/controller_manager",
-            ],
-            output="screen"
-        )
-    
-    action_load_arm_controller = launch_ros.actions.Node(
-                package="controller_manager",
-                executable="spawner",
-                arguments=[
-                    "arm_controller",
-                    "--controller-manager",
-                    "/controller_manager",
-                ],
-                output="screen"
-            )
-    action_load_gripper_controller = launch_ros.actions.Node(
-                    package="controller_manager",
-                    executable="spawner",
-                    arguments=[
-                        "gripper_controller",
-                        "--controller-manager",
-                        "/controller_manager",
-                    ],
-                    output="screen"
-                )
-     
-    start_controllers_after_spawn = RegisterEventHandler(
-        OnProcessExit(
-            target_action=action_spawn_entity,
-            on_exit=[
-                action_load_joint_state_controller,
-                action_load_arm_controller,
-                action_load_gripper_controller,
-
-            ],
-        )
-    )
-
-    action_launch_move_group = launch_ros.actions.Node(
-        package="moveit_ros_move_group",
-        executable="move_group",
-        output="screen",
-        parameters=[
-            moveit_config.to_dict(),
-            {
-                "use_sim_time": True,
-                "allow_trajectory_execution": True,
-                "publish_robot_description_semantic": True,
-                "publish_planning_scene": True,
-                "publish_geometry_updates": True,
-                "publish_state_updates": True,
-                "publish_transforms_updates": True,
-            },
-        ],
-    )
-
-    action_rviz = launch_ros.actions.Node(
-        package="rviz2",
-        executable="rviz2",
-        output="log",
-        condition=launch.conditions.IfCondition(use_rviz),
-        arguments=["-d", os.path.join(get_package_share_directory("my_robot_moveit_pkg"), "config", "moveit.rviz")],
-        parameters=[
-            {"use_sim_time": True},
-        ],
-    )
-
-    action_launch_commander = launch_ros.actions.Node(
-        package="my_robot_commander",
-        executable="commander",
-        output="screen",
-        parameters=[
-            {"use_sim_time": True},
-        ],
-    )
-
-    action_launch_camera = launch_ros.actions.Node(
-        package="my_robot_commander",
-        executable="camera_image",
-        parameters=[
-            {"use_sim_time": True},
-        ],
-    )
-
-
-    
-    
-
-    return launch.LaunchDescription([
-        robot_description_xacro_arg,
-        gui_arg,
-        use_rviz_arg,
-        environment_variable,
-        resource_environment_variable,
-        disable_gazebo_model_database,
-        action_robot_state_publisher,
-        action_launch_gazebo,
-        action_spawn_entity,
-        action_spawn_marker,
-        start_controllers_after_spawn,
-        action_launch_move_group,
-        action_rviz,  
-        action_launch_commander,
-        action_launch_camera,
-    ])
+    controller_handler = RegisterEventHandler(OnProcessExit(
+        target_action=spawn, on_exit=after_spawn))
+    config_file = os.path.join(perception_path, 'config', 'perception.yaml')
+    perception = [
+        Node(package='my_robot_perception', executable=name, output='screen',
+             parameters=[config_file, {'use_sim_time': True}])
+        for name in ['color_detector', 'depth_localizer']
+    ]
+    return LaunchDescription(args + environment + [
+        Node(package='robot_state_publisher', executable='robot_state_publisher',
+             parameters=[robot_params], output='screen'),
+        gazebo,
+        controller_handler,
+        spawn,
+        Node(package='moveit_ros_move_group', executable='move_group', output='screen',
+             parameters=moveit_params + [{
+                 'allow_trajectory_execution': True,
+                 'publish_robot_description': True,
+                 'publish_robot_description_semantic': True,
+                 'publish_planning_scene': True,
+                 'publish_geometry_updates': True,
+                 'publish_state_updates': True,
+                 'publish_transforms_updates': True,
+             }]),
+        Node(package='rviz2', executable='rviz2', output='log',
+             condition=IfCondition(LaunchConfiguration('use_rviz')),
+             arguments=['-d', os.path.join(get_package_share_directory(
+                 'my_robot_moveit_pkg'), 'config', 'moveit.rviz')],
+             parameters=moveit_params),
+        Node(package='my_robot_commander', executable='commander', output='screen',
+             parameters=moveit_params),
+    ] + perception)

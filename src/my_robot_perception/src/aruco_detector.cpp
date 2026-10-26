@@ -21,7 +21,7 @@
 
 
 
-class CameraNode : public rclcpp::Node
+class ArucoDetector : public rclcpp::Node
 {
     private:
         rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;
@@ -37,7 +37,7 @@ class CameraNode : public rclcpp::Node
 
 
     public:
-        CameraNode(): Node("camera_node")
+        ArucoDetector(): Node("aruco_detector")
         {
             // The 0.2 m board has a 50 px quiet zone around a 500 px marker.
             marker_size_ = this->declare_parameter<double>("marker_size", 0.1666666667);
@@ -47,7 +47,7 @@ class CameraNode : public rclcpp::Node
             tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
             subscription_ =
                 this->create_subscription<sensor_msgs::msg::Image>("/camera_sensor/image_raw",10,std::bind(
-                        &CameraNode::image_callback,
+                        &ArucoDetector::image_callback,
                         this,
                         std::placeholders::_1
                     )
@@ -55,7 +55,7 @@ class CameraNode : public rclcpp::Node
             camera_info_subscription_ =
                 this->create_subscription<sensor_msgs::msg::CameraInfo>(
                     "/camera_sensor/camera_info", 10,
-                    std::bind(&CameraNode::camera_info_callback, this, std::placeholders::_1));
+                    std::bind(&ArucoDetector::camera_info_callback, this, std::placeholders::_1));
             RCLCPP_INFO(this->get_logger(),"Camera node started" );
             dictionary_ =cv::aruco::getPredefinedDictionary(cv::aruco::DICT_5X5_250);
             camera_matrix_ =(cv::Mat_<double>(3,3)<<400.2,0,400,
@@ -163,7 +163,7 @@ class CameraNode : public rclcpp::Node
 
                     cv::putText(
                         image,text,
-                        cv::Point(20,50+10*ids[i]),
+                        cv::Point(20,50+10*i),
                         cv::FONT_HERSHEY_SIMPLEX,
                         0.8,
                         cv::Scalar(0,255,0),
@@ -254,7 +254,7 @@ int main(int argc,char **argv)
 
 
     auto node =
-        std::make_shared<CameraNode>();
+        std::make_shared<ArucoDetector>();
 
 
     rclcpp::spin(node);

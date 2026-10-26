@@ -8,12 +8,17 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(action_msgs REQUIRED)
 
-#cmake函数，来自依赖rosidl_default_genterators，用于将msg消息订阅接口文件转化为库或者头文件
+# 生成消息与 Action 的 C++ / Python 接口。
 rosidl_generate_interfaces( ${PROJECT_NAME}
     "msg/Robotinterface.msg"
+    "action/PickPlace.action"
+    DEPENDENCIES geometry_msgs action_msgs
 )
 
+ament_export_dependencies(rosidl_default_runtime)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

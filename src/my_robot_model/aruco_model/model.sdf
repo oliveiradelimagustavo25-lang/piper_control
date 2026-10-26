@@ -33,11 +33,11 @@
         <script>
 
             <uri>
-                file://aruco_model/materials/scripts/marker.material
+                model://aruco_model/materials/scripts
             </uri>
 
             <uri>
-                file://aruco_model/materials/textures
+                model://aruco_model/materials/textures
             </uri>
 
             <name>

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(my_aruco_pkg)
+project(my_robot_model)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -10,20 +10,11 @@ find_package(ament_cmake REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
-find_package(OpenCV REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
-add_executable(aruco_image src/aruco_image.cpp)
-ament_target_dependencies(aruco_image ament_index_cpp OpenCV)
 
 
-
-install(TARGETS  aruco_image
-        DESTINATION lib/${PROJECT_NAME}
-
-)
-
-install(DIRECTORY  aruco_model
+install(DIRECTORY  blue_cube green_cube red_cube aruco_model 
 DESTINATION share/${PROJECT_NAME}
 )
 
