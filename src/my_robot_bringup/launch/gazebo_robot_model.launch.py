@@ -6,7 +6,7 @@ from launch.actions import (
     DeclareLaunchArgument, IncludeLaunchDescription, LogInfo,
     RegisterEventHandler, SetEnvironmentVariable,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
@@ -34,6 +34,11 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
+        DeclareLaunchArgument('world', default_value=os.path.join(robot_path, 'world', 'room.world')),
+        DeclareLaunchArgument('manipulation_config', default_value=os.path.join(
+            get_package_share_directory('my_robot_commander'), 'config', 'manipulation.yaml')),
+        DeclareLaunchArgument('use_pick_place', default_value='true',
+                              description='Use the Action executor; false selects the Topic debug node.'),
         DeclareLaunchArgument('robot_model', default_value=os.path.join(
             robot_path, 'urdf', 'gazebo_piper_description.xacro')),
         # 仅作用于本 launch 的子进程，不修改用户 Shell 配置。
@@ -58,7 +63,7 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('gazebo_ros'), 'launch', 'gazebo.launch.py')),
         launch_arguments={
-            'world': os.path.join(robot_path, 'world', 'room.world'),
+            'world': LaunchConfiguration('world'),
             'verbose': 'true', 'gui': LaunchConfiguration('gui'),
         }.items(),
     )
@@ -108,5 +113,10 @@ def generate_launch_description():
                  'my_robot_moveit_pkg'), 'config', 'moveit.rviz')],
              parameters=moveit_params),
         Node(package='my_robot_commander', executable='commander', output='screen',
+             condition=UnlessCondition(LaunchConfiguration('use_pick_place')),
              parameters=moveit_params),
+        # 两个运动入口互斥，防止调试 Topic 干扰抓放任务。
+        Node(package='my_robot_commander', executable='pick_place_executor', output='screen',
+             condition=IfCondition(LaunchConfiguration('use_pick_place')),
+             parameters=moveit_params + [LaunchConfiguration('manipulation_config')]),
     ] + perception)

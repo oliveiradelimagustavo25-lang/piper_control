@@ -1,188 +1,119 @@
-#include "rclcpp/rclcpp.hpp"
-#include "tf2/LinearMath/Quaternion.hpp"     //四元函数转化
-#include "moveit/move_group_interface/move_group_interface.h"
-#include "geometry_msgs/msg/pose.hpp"
-#include "moveit_msgs/msg/robot_trajectory.hpp"
-#include "example_interfaces/msg/bool.hpp"
-#include "example_interfaces/msg/float32_multi_array.hpp"
-#include "example_interfaces/msg/string.hpp"
-#include "my_robot_interface/msg/robotinterface.hpp"
+#include <array>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
 
-using RobotPoseinterface = my_robot_interface::msg::Robotinterface;
+#include <example_interfaces/msg/bool.hpp>
+#include <example_interfaces/msg/float32_multi_array.hpp>
+#include <example_interfaces/msg/string.hpp>
+#include <my_robot_interface/msg/robotinterface.hpp>
+#include <rclcpp/rclcpp.hpp>
 
+#include "my_robot_commander/motion_controller.hpp"
+
+namespace
+{
+template<typename T>
+T parameter(const rclcpp::Node::SharedPtr & node, const std::string & name, const T & fallback)
+{
+  if (!node->has_parameter(name)) {
+    return node->declare_parameter<T>(name, fallback);
+  }
+  return node->get_parameter(name).get_value<T>();
+}
+
+my_robot_commander::MotionController::Options motionOptions(const rclcpp::Node::SharedPtr & node)
+{
+  my_robot_commander::MotionController::Options options;
+  options.arm_group = parameter(node, "arm_group", options.arm_group);
+  options.gripper_group = parameter(node, "gripper_group", options.gripper_group);
+  options.reference_frame = parameter(node, "reference_frame", options.reference_frame);
+  options.end_effector_link = parameter(node, "end_effector_link", options.end_effector_link);
+  options.gripper_open_target = parameter(node, "gripper_open_target", options.gripper_open_target);
+  options.gripper_close_target = parameter(node, "gripper_close_target", options.gripper_close_target);
+  options.velocity_scaling = parameter(node, "velocity_scaling", options.velocity_scaling);
+  options.acceleration_scaling = parameter(node, "acceleration_scaling", options.acceleration_scaling);
+  options.planning_time = parameter(node, "planning_time", options.planning_time);
+  options.cartesian_step = parameter(node, "cartesian_step", options.cartesian_step);
+  return options;
+}
+}  // namespace
+
+// 兼容原有四个 Topic；抓放 Action 节点可直接复用 MotionController。
 class Commander
 {
-    private:
-        std::shared_ptr<rclcpp::Node> node_;
-        std::shared_ptr<moveit::planning_interface::MoveGroupInterface> arm_;
-        std::shared_ptr<moveit::planning_interface::MoveGroupInterface> gripper_;
-        //std::thread spin_thread;
-        rclcpp::Subscription<example_interfaces::msg::String>::SharedPtr name_target_sub;
-        rclcpp::Subscription<example_interfaces::msg::Bool>::SharedPtr open_gripper_sub;
-        rclcpp::Subscription<example_interfaces::msg::Float32MultiArray>::SharedPtr joint_cmd_sub;
-        rclcpp::Subscription<RobotPoseinterface>::SharedPtr pose_cmd_sub;
+public:
+  explicit Commander(const rclcpp::Node::SharedPtr & node)
+  : node_(node), motion_(node, motionOptions(node))
+  {
+    name_sub_ = node_->create_subscription<example_interfaces::msg::String>(
+      "name_target", 10, [this](example_interfaces::msg::String::ConstSharedPtr msg) {
+        motion_.moveToNamedTarget(msg->data);
+      });
+    gripper_sub_ = node_->create_subscription<example_interfaces::msg::Bool>(
+      "open_gripper", 10, [this](example_interfaces::msg::Bool::ConstSharedPtr msg) {
+        if (msg->data) {
+          motion_.openGripper();
+        } else {
+          motion_.closeGripper();
+        }
+      });
+    joints_sub_ = node_->create_subscription<example_interfaces::msg::Float32MultiArray>(
+      "joint_cmd", 10, [this](example_interfaces::msg::Float32MultiArray::ConstSharedPtr msg) {
+        motion_.moveToJoints(std::vector<double>(msg->data.begin(), msg->data.end()));
+      });
+    pose_sub_ = node_->create_subscription<my_robot_interface::msg::Robotinterface>(
+      "pose_command", 10, [this](my_robot_interface::msg::Robotinterface::ConstSharedPtr msg) {
+        if (msg->position.size() != 3 || msg->radian.size() != 3) {
+          RCLCPP_ERROR(node_->get_logger(), "pose_command requires 3 position and 3 radian values");
+          return;
+        }
+        motion_.moveToPose(
+            std::array<double, 3>{msg->position[0], msg->position[1], msg->position[2]},
+            std::array<double, 3>{msg->radian[0], msg->radian[1], msg->radian[2]}, msg->cartesian);
+      });
+  }
 
-    public:
-        Commander(std::shared_ptr<rclcpp::Node> node)
-        {
-            this->node_ = node ;
-
-            this->arm_ = std::make_shared<moveit::planning_interface::MoveGroupInterface> (node_,"arm");
-            this->arm_->setMaxAccelerationScalingFactor(1.0);
-            this->arm_->setMaxVelocityScalingFactor(1.0);
-
-            this->gripper_ = std::make_shared<moveit::planning_interface::MoveGroupInterface> (node_,"gripper");
-            this->gripper_->setMaxAccelerationScalingFactor(1.0);
-            this->gripper_->setMaxVelocityScalingFactor(1.0);
-            
-            name_target_sub = node->create_subscription<example_interfaces::msg::String>("name_target",10,std::bind(&Commander::NameTargetCallback,this,std::placeholders::_1));
-            open_gripper_sub = node_->create_subscription<example_interfaces::msg::Bool>("open_gripper",10,std::bind(&Commander::OpenGripperCallback,this,std::placeholders::_1));
-            joint_cmd_sub = node_->create_subscription<example_interfaces::msg::Float32MultiArray>("joint_cmd",10,std::bind(&Commander::JointCmdCallback,this,std::placeholders::_1));
-            pose_cmd_sub = node->create_subscription<RobotPoseinterface>("pose_command",10,std::bind(&Commander::PoseCmdCallback,this,std::placeholders::_1));
-            
-            /*
-            rclcpp::executors::SingleThreadedExecutor executor;
-            executor.add_node(this->node_);
-            this->spin_thread = std::thread([&executor]()
-                {
-                    executor.spin();
-                }
-            );
-            */
-        }
-        void GoToNameTarget(const std::string& name)
-        {
-            this->arm_->setStartStateToCurrentState();
-            this->arm_->setNamedTarget(name);
-            PlanAndExecute(arm_);
-        }
-        void GoToJointTarget(const std::vector<double>& joints)
-        {
-            this->arm_->setStartStateToCurrentState();
-            this->arm_->setJointValueTarget(joints);
-            PlanAndExecute(arm_);       
-        }
-        void GoToPoseTarget(const double* XYZ_position,const double* RXY_radian,bool cartesian=false)
-        {
-            geometry_msgs::msg::PoseStamped target_pose;
-            tf2::Quaternion q;
-
-            q.setRPY(*RXY_radian,*(RXY_radian+1),*(RXY_radian+2));
-            q = q.normalize();
-            target_pose.header.frame_id = "base_link";
-            target_pose.pose.position.x = XYZ_position[0];
-            target_pose.pose.position.y = XYZ_position[1];
-            target_pose.pose.position.z = XYZ_position[2];
-            target_pose.pose.orientation.x = q.getX();
-            target_pose.pose.orientation.y = q.getY();
-            target_pose.pose.orientation.z = q.getZ();
-            target_pose.pose.orientation.w = q.getW();
-            if(!cartesian)
-            {
-                this->arm_->setStartStateToCurrentState();
-                this->arm_->setPoseTarget(target_pose);
-                PlanAndExecute(this->arm_);
-            }
-            else
-            {
-                std::vector<geometry_msgs::msg::Pose>  waypose;
-                waypose.push_back(target_pose.pose);
-                moveit_msgs::msg::RobotTrajectory trajectory;
-                double fraction = this->arm_->computeCartesianPath(waypose,0.01,0.0,trajectory);
-                if(fraction == 1 )
-                {
-                    arm_->execute(trajectory);
-                }
-                else
-                {
-                    RCLCPP_ERROR(node_->get_logger(), "Cartesian path incomplete: %.1f%%", fraction * 100.0);
-                }
-            }
-        }
-
-        void PlanAndExecute(std::shared_ptr<moveit::planning_interface::MoveGroupInterface> group)
-        {
-            moveit::planning_interface::MoveGroupInterface::Plan arm_plan;
-
-            if(group->plan(arm_plan) == moveit::core::MoveItErrorCode::SUCCESS)
-            {
-                group->execute(arm_plan);
-            }
-            else
-            {
-                RCLCPP_ERROR(node_->get_logger(), "MoveIt failed to plan a path to the requested target");
-            }
-        }
-
-        void Gripper_open()
-        {
-            this->gripper_->setStartStateToCurrentState();
-            this->gripper_->setNamedTarget("open");
-            PlanAndExecute(gripper_);
-        }
-        void Gripper_close()
-        {
-            this->gripper_->setStartStateToCurrentState();
-            this->gripper_->setNamedTarget("close");
-            PlanAndExecute(gripper_);
-        }
-        void NameTargetCallback(const example_interfaces::msg::String& name )
-        {
-            GoToNameTarget(name.data);
-        }
-
-        void OpenGripperCallback(const example_interfaces::msg::Bool& open )
-        {
-            if(open.data)
-            {
-                this->Gripper_open();
-            }
-            else{
-                this->Gripper_close();
-            }
-        }
-
-        void JointCmdCallback(const example_interfaces::msg::Float32MultiArray& msg)
-        {
-            //将msg.data中的std::vector<float>迁移成std::vector<double> joints
-            std::vector<double> joints(msg.data.begin(), msg.data.end());
-            if( joints.size() == 6)
-            {
-                GoToJointTarget(joints);
-            }
-        }
-        void PoseCmdCallback(const RobotPoseinterface& msg)
-        {
-            if (msg.position.size() != 3 || msg.radian.size() != 3)
-            {
-                RCLCPP_ERROR(node_->get_logger(), "pose_command requires exactly 3 position and 3 radian values");
-                return;
-            }
-            GoToPoseTarget(msg.position.data(), msg.radian.data(),msg.cartesian);
-        }
+private:
+  rclcpp::Node::SharedPtr node_;
+  my_robot_commander::MotionController motion_;
+  rclcpp::Subscription<example_interfaces::msg::String>::SharedPtr name_sub_;
+  rclcpp::Subscription<example_interfaces::msg::Bool>::SharedPtr gripper_sub_;
+  rclcpp::Subscription<example_interfaces::msg::Float32MultiArray>::SharedPtr joints_sub_;
+  rclcpp::Subscription<my_robot_interface::msg::Robotinterface>::SharedPtr pose_sub_;
 };
 
-int main(int argc,char** argv)
+int main(int argc, char ** argv)
 {
-    rclcpp::init(argc,argv);
-    try
-    {
-        auto node = std::make_shared<rclcpp::Node>(
-            "commander", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
-        auto commander = Commander(node);
-        RCLCPP_INFO(node->get_logger(), "Commander ready");
-        rclcpp::spin(node);
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<rclcpp::Node>(
+    "commander", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
+  // 运动调用是阻塞的，executor 持续处理 MoveIt 状态和执行结果。
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  executor.add_node(node);
+  int result = 0;
+  std::thread spin_thread([&]() {
+    try {
+      executor.spin();
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(node->get_logger(), "Executor stopped: %s", error.what());
     }
-    catch (const std::exception & error)
-    {
-        // 初始化等待期间被用户关闭时，不将正常退出当成未捕获异常。
-        if (rclcpp::ok())
-        {
-            RCLCPP_ERROR(rclcpp::get_logger("commander"), "%s", error.what());
-            rclcpp::shutdown();
-            return 1;
-        }
+  });
+  try {
+    Commander commander(node);
+    RCLCPP_INFO(node->get_logger(), "Commander ready");
+    spin_thread.join();
+  } catch (const std::exception & error) {
+    if (rclcpp::ok()) {
+      RCLCPP_ERROR(node->get_logger(), "%s", error.what());
+      result = 1;
     }
-    rclcpp::shutdown();
-    return 0;
+  }
+  executor.cancel();
+  if (spin_thread.joinable()) {
+    spin_thread.join();
+  }
+  rclcpp::shutdown();
+  return result;
 }

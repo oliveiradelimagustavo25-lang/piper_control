@@ -2,7 +2,7 @@
 
 目标是在 Gazebo 中完成红、绿、蓝物块的视觉定位与抓放，再将感知和任务逻辑迁移到 Piper_x 实机。
 
-当前已验证机器人生成、控制器激活、三个物块生成和视觉数据话题；自动抓放执行节点尚未实现。定位话题有数据不代表定位精度已经验收。
+当前已验证机器人生成、控制器激活、三个物块生成和视觉数据话题；单物块抓放 Action 执行节点已实现，完整物理抓放尚待验证。定位话题有数据不代表定位精度已经验收。
 
 ## 1. 环境基线
 
@@ -96,8 +96,9 @@ src/
 │   └── action/PickPlace.action
 ├── my_robot_commander/
 │   └── src/
-│       ├── commander.cpp
-│       └── camera_move_arm.cpp
+│       ├── commander.cpp          # 原话题兼容入口
+│       ├── motion_controller.cpp  # 可复用的 MoveIt 运动库
+│       └── pick_place_executor.cpp  # 单物块抓放 Action 服务端
 ├── my_robot_moveit_pkg/     # SRDF、运动学、限位、控制器配置
 └── my_robot_bringup/
     └── launch/gazebo_robot_model.launch.py
@@ -135,7 +136,7 @@ ros2 launch my_robot_bringup gazebo_robot_model.launch.py
 ros2 launch my_robot_bringup gazebo_robot_model.launch.py gui:=false use_rviz:=false
 ```
 
-主 launch 启动机器人、Gazebo、MoveIt、控制器、commander，以及颜色和深度定位节点。它不自动生成工作物块，也不启动 ArUco 检测。
+主 launch 启动机器人、Gazebo、MoveIt、控制器、pick_place_executor，以及颜色和深度定位节点。使用 `use_pick_place:=false` 可以切回 commander 调试入口，两者不会同时启动。它不自动生成工作物块，也不启动 ArUco 检测。
 
 终端二：
 
@@ -215,7 +216,7 @@ RGB → color_detector → 颜色标签图
 
 ## 7. 抓放 Action 与后续开发
 
-`PickPlace.action` 已生成，目前尚无对应执行服务端：
+`PickPlace.action` 对应服务端为 `/manipulation/pick_place`：
 
 | 部分 | 字段 |
 | --- | --- |
@@ -232,14 +233,14 @@ ros2 interface show my_robot_interface/action/PickPlace
 下一步依次实现：
 
 1. 验证视觉坐标与 Gazebo 真值的误差，确定表面点到物体中心的换算方式。
-2. 新增 `my_robot_commander/src/pick_place_executor.cpp`，实现 Action 服务端。
-3. 新增 `my_robot_commander/config/manipulation.yaml`，配置 TCP、抓取朝向、接近距离和速度。
+2. 已新增 `my_robot_commander/src/pick_place_executor.cpp`；接下来验证实际抓放效果。
+3. 在 `my_robot_commander/config/manipulation.yaml` 中标定 TCP、抓取朝向、接近距离和速度。
 4. 先用手动目标完成单物块抓放，并验证接触、摩擦和夹持效果。
 5. 增加桌面与物块碰撞盒，以及抓取后的附着/解除附着管理。
 6. 新增任务节点，接收视觉结果，按颜色选择放置区并执行三物块任务。
 7. 完成 Piper_x 驱动适配、相机外参和 TCP 标定，再进行实机验证。
 
-当前 `camera_move_arm.cpp` 仍是 ArUco 位姿桥接工具，新执行链路完成后再退出旧流程。
+旧的 `camera_move_arm.cpp` 位姿桥接节点已移除，后续由任务节点发送 PickPlace Action。当前 Action 服务端已实现，视觉任务调度节点尚未实现。
 
 ## 8. 已知配置和排查入口
 
@@ -261,3 +262,94 @@ ros2 topic echo /perception/object_points --once
 ```
 
 2026-10-26 的无界面测试验证了 Piper 和三物块生成、三个控制器 active、commander 就绪及各视觉话题收到数据。没有验证抓取动作、定位精度或 GUI 显示。若本地保留日志，可查看 `log/sim_smoke_20261026/report.json`；`log/` 被 Git 忽略，不保证克隆仓库后存在。
+
+## 9. 复用 MotionController
+
+公共头文件位于 `my_robot_commander/motion_controller.hpp`。这是普通 C++ 类，不是独立节点；实现位于已导出的共享库，其他包需要声明依赖并链接，不能只复制头文件。
+
+在调用包的 `package.xml` 添加：
+
+```xml
+<depend>my_robot_commander</depend>
+```
+
+在其 `CMakeLists.txt` 添加（将 `your_node` 替换为实际目标）：
+
+```cmake
+find_package(my_robot_commander REQUIRED)
+target_link_libraries(your_node my_robot_commander::motion_controller)
+```
+
+代码示例（使用一个已传入 robot_description / SRDF / kinematics 参数且由 executor 持续处理回调的 node）：
+
+```cpp
+#include <my_robot_commander/motion_controller.hpp>
+
+my_robot_commander::MotionController::Options options;
+options.reference_frame = "base_link";
+options.velocity_scaling = 0.2;
+my_robot_commander::MotionController motion(node, options);
+
+bool success = motion.moveToNamedTarget("home");
+// 也可调用 moveToJoints、moveToPose、openGripper、closeGripper。
+```
+
+这些方法同步等待规划与执行，并返回 bool。执行期间必须有 executor 处理 ROS 回调；不要在唯一的 executor 线程中阻塞所有 MoveIt 回调。当前 commander 使用后台多线程 executor，并保留 name_target、joint_cmd、pose_command、open_gripper 四个话题。
+
+默认组名为 arm / gripper，开合命名目标为 open / close；可通过 Options 适配其他具有 MoveIt 配置的机器人。更换机器人仍需相应 URDF、SRDF、运动学和驱动配置。直线 moveToPose 要求输入已转换到 Options.reference_frame，且仅在完整路径计算成功后执行。
+
+true 表示轨迹执行成功，不证明已夹住物块。此库暂未提供立即中断或急停接口；Action 执行器目前只在当前动作结束后响应取消。
+
+## 10. 单物块抓放执行器
+
+默认仿真 launch 已加载 `config/manipulation.yaml`，Action 名称为 `/manipulation/pick_place`。它只在收到目标后开始运动，不自动订阅物体定位点或执行三色调度。
+
+关键参数：
+
+| 参数 | 含义 |
+| --- | --- |
+| tool_to_tcp | link6 到夹持中心的平移，在 link6 坐标系表达；当前 0.132 m 为网格推算初值，物理夹持仍待调试 |
+| grasp_rpy | 固定抓取朝向，单位 rad，当前向下抓取 |
+| grasp_offset | 物块中心到夹持中心的额外平移，在 reference_frame 中表达 |
+| approach_distance | 预抓取点高于抓取点的距离 |
+| lift_distance / transport_height | 最小抬升距离 / TCP 搬运高度下限 |
+| release_clearance / retreat_distance | 放置时的抬高余量 / 松开后的撤离距离 |
+| gripper_open_width / gripper_compression | 张开宽度 / 相对物块投影宽度的闭合余量 |
+| gripper_joint_signs | gripper 组变量顺序对应的方向；当前 joint7=+q、joint8=-q |
+| velocity_scaling / acceleration_scaling | 运动速度与加速度缩放 |
+| max_target_age | 非零时间戳观测的最大年龄；零时间戳可用于手动静态目标 |
+
+位置与距离单位为 m。Piper 的两个手指暂按开口宽度=2*q 计算，实际接触宽度和 TCP 需要通过模型及实物标定确认。夹紧指令执行完成不等于已验证抓住物体。
+
+执行顺序为：张开 → 预抓取 → 直线下降 → 夹紧 → 直线抬升 → 搬运 → 直线下降 → 松开 → 撤离。任何一步失败都会终止后续步骤。取消请求在当前动作结束后生效，保持当时夹爪状态；不是立即停止接口。
+
+本版固定工具朝向，要求物体抓取前与放置后的朝向一致。放置位置由 Action 提供，颜色与放置区映射应放在后续任务节点配置中。
+
+当前执行器使用 MoveIt 已有规划场景，不自动添加桌面、其他物块或搬运负载。碰撞盒和附着管理仍需后续补齐；成功结果仅表示运动序列完成，实际放置应由视觉验证。
+
+在仅仿真环境中，校准 TCP 并确认目标位置后，可用下面的手动目标测试（命令会触发运动）：
+
+```bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=1
+ros2 action send_goal /manipulation/pick_place my_robot_interface/action/PickPlace '
+object_id: blue_cube
+object_pose:
+  header: {frame_id: base_link}
+  pose:
+    position: {x: 0.26, y: 0.04, z: 0.005}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+object_dimensions: {x: 0.01, y: 0.01, z: 0.01}
+place_pose:
+  header: {frame_id: base_link}
+  pose:
+    position: {x: 0.26, y: -0.04, z: 0.005}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+' --feedback
+```
+
+该示例要求相应蓝色物块实际位于指定抓取位置，放置区域无其他物块。不要将深度表面点直接作为 object_pose 的中心位置。
+
+无 GUI 的运动接口及真实物块抓放检测方法见 [validation/README.md](validation/README.md)。测试分别判断运动序列与物理抓放结果。
+
+2026-10-27 执行器检测结果见 [validation/RESULTS.md](validation/RESULTS.md)：运动接口和 Action 流程通过，实际物块夹取未通过，需继续调试物理接触。
