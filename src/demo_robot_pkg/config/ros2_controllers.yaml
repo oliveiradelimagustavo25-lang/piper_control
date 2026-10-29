@@ -1,7 +1,7 @@
 # This config file is used by ros2_control
 controller_manager:
   ros__parameters:
-    update_rate: 100  # Hz
+    update_rate: 1000  # 与 Gazebo 的 1 ms 物理步长一致
 
     gripper_controller:
       type: joint_trajectory_controller/JointTrajectoryController
@@ -34,7 +34,15 @@ arm_controller:
       - joint5
       - joint6
     command_interfaces:
-      - position
+      - velocity
     state_interfaces:
       - position
       - velocity
+    # 按轨迹位置误差生成关节速度；当前未启用速度前馈。
+    gains:
+      joint1: {p: 20.0, i: 0.0, d: 0.0}
+      joint2: {p: 20.0, i: 0.0, d: 0.0}
+      joint3: {p: 20.0, i: 0.0, d: 0.0}
+      joint4: {p: 20.0, i: 0.0, d: 0.0}
+      joint5: {p: 20.0, i: 0.0, d: 0.0}
+      joint6: {p: 20.0, i: 0.0, d: 0.0}

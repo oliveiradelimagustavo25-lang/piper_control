@@ -2,7 +2,7 @@
 
 目标是在 Gazebo 中完成红、绿、蓝物块的视觉定位与抓放，再将感知和任务逻辑迁移到 Piper_x 实机。
 
-当前已验证机器人生成、控制器激活、三个物块生成和视觉数据话题；单物块抓放 Action 执行节点已实现，完整物理抓放尚待验证。定位话题有数据不代表定位精度已经验收。
+当前已验证单物块仿真抓放，并在固定场景完成了一次三色视觉分拣闭环：观察位、颜色分割、深度中心定位、任务排序和实际抓放。任务逻辑还通过模拟执行端接口测试；多场景成功率与实机精度仍需验收。
 
 ## 1. 环境基线
 
@@ -16,7 +16,7 @@
 | 仿真 | Gazebo Classic 11 |
 | 运动规划 | MoveIt 2，当前安装版本 2.5.9 |
 | 视觉 | 系统 OpenCV 4.5.4，包含 contrib / ArUco |
-| ROS 通信 | 当前仿真默认 Fast DDS、本机通信 |
+| ROS 通信 | RMW 继承终端配置，当前终端为 Cyclone DDS；仿真默认本机通信 |
 | Python 数值与 YAML | Ubuntu 包提供 NumPy 1.21.5、PyYAML 5.4.1 |
 
 本项目使用 Gazebo Classic 的 `gazebo_ros` 与 `gazebo_ros2_control`，并非新版 Gazebo 的 `ros_gz` 接口。
@@ -92,8 +92,12 @@ src/
 │   │   └── depth_localizer.cpp
 │   └── config/perception.yaml
 ├── my_robot_interface/
-│   ├── msg/Robotinterface.msg
-│   └── action/PickPlace.action
+│   ├── msg/                    # Robotinterface / DetectedObject / DetectedObjectArray
+│   └── action/                 # PickPlace / MoveToNamed / SortObjects
+├── my_robot_planner/
+│   ├── src/task_planner.cpp
+│   ├── config/task_planner.yaml
+│   └── launch/task_planner.launch.py
 ├── my_robot_commander/
 │   └── src/
 │       ├── commander.cpp          # 原话题兼容入口
@@ -136,7 +140,7 @@ ros2 launch my_robot_bringup gazebo_robot_model.launch.py
 ros2 launch my_robot_bringup gazebo_robot_model.launch.py gui:=false use_rviz:=false
 ```
 
-主 launch 启动机器人、Gazebo、MoveIt、控制器、pick_place_executor，以及颜色和深度定位节点。使用 `use_pick_place:=false` 可以切回 commander 调试入口，两者不会同时启动。它不自动生成工作物块，也不启动 ArUco 检测。
+主 launch 启动机器人、Gazebo、MoveIt、控制器、pick_place_executor、task_planner，以及颜色和深度定位节点。规划器收到分拣 Action 后才开始工作。使用 `use_task_planner:=false` 可停用任务节点；`use_pick_place:=false` 切回 commander 调试入口，并默认停用任务节点。它不自动生成工作物块，也不启动 ArUco 检测。
 
 终端二：
 
@@ -184,19 +188,23 @@ ros2 run my_robot_perception aruco_detector --ros-args \
 独立运行节点或 ROS CLI 检查工具前，使用与仿真一致的通信环境：
 
 ```bash
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# RMW_IMPLEMENTATION 沿用终端配置，项目不再强制切换。
 export ROS_LOCALHOST_ONLY=1
 export ROS_DOMAIN_ID=0
 ```
 
-这三个设置影响当前终端。主 launch 与单物体 spawn 已默认给子进程设置 Fast DDS 和本机通信，ROS 域编号继承启动终端。多机实机通信时需要重新配置网络和 localhost 设置。
+主 launch 与单物体 spawn 继承终端的 RMW 和 ROS 域编号，不再强制使用 Fast DDS；默认给子进程设置本机通信。多机实机通信时需要重新配置网络和 localhost 设置。
 
 ## 6. 视觉输入输出
 
 ```text
 RGB → color_detector → 颜色标签图
                             ↓
-对齐深度 + CameraInfo → depth_localizer → 带颜色标签的三维点
+对齐深度 + CameraInfo → depth_localizer → 表面调试点 / 物体中心列表
+                                                 ↓
+                                            task_planner
+                                                 ↓ PickPlace.action
+                                         pick_place_executor
 ```
 
 | 话题 | 类型 | 含义 |
@@ -207,10 +215,13 @@ RGB → color_detector → 颜色标签图
 | `/perception/color_labels` | `sensor_msgs/msg/Image`，mono8 | 0 背景，1 红，2 绿，3 蓝 |
 | `/perception/color_debug` | `sensor_msgs/msg/Image`，bgr8 | 检测框与中心标注 |
 | `/perception/object_points` | `sensor_msgs/msg/PointCloud2` | 字段 x/y/z/label，每个有效连通区域一个代表点 |
+| `/perception/objects` | `my_robot_interface/msg/DetectedObjectArray` | 共用采集时间、坐标系的物体中心、尺寸、颜色、ID 列表 |
 
 定位要求深度与 RGB 对齐、尺寸及光学坐标系一致。深度支持 `32FC1` 米制和 `16UC1` 毫米制。标签图保留 RGB 的采集时间，定位节点按时间匹配深度。
 
-输出是可见表面的估计点，不是完整表面点云、物块几何中心或夹爪目标。当前不输出物体朝向或稳定跟踪编号；同色相邻物体也可能合并为一个连通区域。输出为空或数据过期时，后续任务节点必须停止沿用旧目标。
+`object_points` 保留可见表面代表点，用于调试。`objects` 新增物体中心：将区域深度像素变换到 Z 轴向上的 `objects_frame`，选取上部表面点，以 XY 范围中点和“上表面高度减半高”估计中心。尺寸来自 `object_dimensions`，当前默认 1 cm。此方法要求物块平放、轴向对齐且顶部可见，不估计任意姿态。
+
+第一版每种颜色保留最大的有效连通区域，ID 固定为 red_cube / green_cube / blue_cube，适用于三色各一个物块。同色多物块的稳定跟踪需要后续扩展。无有效目标时发布空列表；对象坐标转换不可用时也发布空列表，原调试点云仍可输出。
 
 `target_frame` 默认空字符串，即相机光学坐标系；设置为 `base_link` 时，需要对应采集时间的 TF。HSV、面积和深度阈值在 `perception.yaml` 中设置，目前仅在启动时读取。
 
@@ -230,17 +241,7 @@ RGB → color_detector → 颜色标签图
 ros2 interface show my_robot_interface/action/PickPlace
 ```
 
-下一步依次实现：
-
-1. 验证视觉坐标与 Gazebo 真值的误差，确定表面点到物体中心的换算方式。
-2. 已新增 `my_robot_commander/src/pick_place_executor.cpp`；接下来验证实际抓放效果。
-3. 在 `my_robot_commander/config/manipulation.yaml` 中标定 TCP、抓取朝向、接近距离和速度。
-4. 先用手动目标完成单物块抓放，并验证接触、摩擦和夹持效果。
-5. 增加桌面与物块碰撞盒，以及抓取后的附着/解除附着管理。
-6. 新增任务节点，接收视觉结果，按颜色选择放置区并执行三物块任务。
-7. 完成 Piper_x 驱动适配、相机外参和 TCP 标定，再进行实机验证。
-
-旧的 `camera_move_arm.cpp` 位姿桥接节点已移除，后续由任务节点发送 PickPlace Action。当前 Action 服务端已实现，视觉任务调度节点尚未实现。
+单物块执行器、物体消息与任务调度已实现。接下来应扩大场景验证视觉定位误差与观察姿态，增加桌面/物块碰撞盒及附着管理，再适配 Piper_x 驱动、相机外参和实机 TCP。分拣 Action 的用法见第 13 节。
 
 ## 8. 已知配置和排查入口
 
@@ -308,7 +309,7 @@ true 表示轨迹执行成功，不证明已夹住物块。此库暂未提供立
 
 | 参数 | 含义 |
 | --- | --- |
-| tool_to_tcp | link6 到夹持中心的平移，在 link6 坐标系表达；当前 0.132 m 为网格推算初值，物理夹持仍待调试 |
+| tool_to_tcp | link6 到夹持中心的平移，在 link6 坐标系表达；当前 0.132 m 已通过 1 cm / 3 cm 物块仿真抓放；实机需标定 |
 | grasp_rpy | 固定抓取朝向，单位 rad，当前向下抓取 |
 | grasp_offset | 物块中心到夹持中心的额外平移，在 reference_frame 中表达 |
 | approach_distance | 预抓取点高于抓取点的距离 |
@@ -330,7 +331,7 @@ true 表示轨迹执行成功，不证明已夹住物块。此库暂未提供立
 在仅仿真环境中，校准 TCP 并确认目标位置后，可用下面的手动目标测试（命令会触发运动）：
 
 ```bash
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# RMW_IMPLEMENTATION 沿用终端配置，项目不再强制切换。
 export ROS_LOCALHOST_ONLY=1
 ros2 action send_goal /manipulation/pick_place my_robot_interface/action/PickPlace '
 object_id: blue_cube
@@ -350,6 +351,260 @@ place_pose:
 
 该示例要求相应蓝色物块实际位于指定抓取位置，放置区域无其他物块。不要将深度表面点直接作为 object_pose 的中心位置。
 
-无 GUI 的运动接口及真实物块抓放检测方法见 [validation/README.md](validation/README.md)。测试分别判断运动序列与物理抓放结果。
+## 11. 执行器验证
 
-2026-10-27 执行器检测结果见 [validation/RESULTS.md](validation/RESULTS.md)：运动接口和 Action 流程通过，实际物块夹取未通过，需继续调试物理接触。
+测试使用独立 ROS 域 `93`、Gazebo 端口 `11493` 和本机 Fast DDS。会实际移动 Gazebo 中的机械臂、夹爪和物块，不连接实机。运行前确认该域和端口未被其他程序使用。
+
+### 构建和运行
+
+从工作区根目录执行：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-select my_robot_commander my_robot_bringup
+source install/setup.bash
+python3 -u test/executor_check.py --mode headless
+
+# 使用 Gazebo 和 RViz 窗口
+python3 -u test/executor_check.py --mode gui
+```
+
+Python 依赖沿用工作区的 ROS、NumPy / PyYAML 系统环境。测试会临时复制世界文件并添加 Gazebo 状态查询插件，源世界文件不变。
+
+### 检查内容
+
+单脚本会自动生成并编译临时 C++ 调用器，直接链接生产环境的 MotionController 库；不创建 ROS 包、不需要手工配置 CMake。检查：
+
+- 错误关节数量、非有限关节值、无效命名目标、零四元数、错误笛卡尔坐标系、夹爪越界目标。
+- 夹爪开合、命名开合目标、自定义夹爪关节目标，并核对实际关节状态。
+- 机械臂命名姿态、关节目标、PoseStamped 位姿、XYZ/RPY 位姿、笛卡尔运动，并核对关节或末端 TF。
+
+关节误差门槛为机械臂 0.02 rad、夹爪 0.002 m；位姿接口的位置和角度门槛为 0.005 m / 0.03 rad。实际误差写入 `motion.log`，逐项结果写入 `motion.json`。
+
+`executor_check.py` 检查：
+
+- Action 服务和三个 active 控制器。
+- 无效目标拒绝、错误时间戳终止、忙碌时拒绝新目标、步间取消。
+- 空载抓放序列的成功结果和四个反馈阶段。
+- 真实物块抓放：通过 Gazebo 状态服务采样物块位置，区分运动流程成功与物理抓放成功。
+
+物理验收要求抬升超过 4 cm，最终三维放置误差小于 2 cm。默认测试物块为 3 cm 立方体，手指和物块的摩擦系数均显式设为 1.0。尺寸与摩擦通过脚本参数设置，源 URDF/SDF 不变。物块质量、惯量按尺寸同步调整；也可用 `--cube-mass` 指定质量。测试失败仍会生成报告，并以非零退出码结束；不能只看 Action success。
+
+### 输出与复测
+
+默认输出位于 `log/executor_validation/<模式>_<时间>/`；可用 `--tag` 指定目录名：
+
+| 文件 | 内容 |
+| --- | --- |
+| report.json | 汇总结果 |
+| motion.json / motion.log | 运动接口逐项结果 / 执行日志 |
+| bringup.log | 仿真和 PickPlace 日志 |
+| object_trace.json / contact_trace.json | 物块位置轨迹 / 接触时间、碰撞体、接触深度和力 |
+| manipulation.yaml / controllers.yaml / world.world | 本次实际使用的抓放、控制器参数和测试世界 |
+| robot.urdf / cube.sdf | 本次尺寸、质量、摩擦设置后的测试模型 |
+
+仅复测抓放、跳过已经通过的运动接口：
+
+```bash
+python3 -u test/executor_check.py --skip-motion --tag action_recheck
+```
+
+只复测物理夹持，可再加 `--skip-air`。例如比较尺寸和摩擦：
+
+```bash
+python3 -u test/executor_check.py --skip-motion --skip-air \
+  --cube-size 0.03 --friction 1.0 --tag cube_3cm_mu1
+python3 -u test/executor_check.py --skip-motion --skip-air \
+  --cube-size 0.03 --friction 5.0 --tag cube_3cm_mu5
+```
+
+未写摩擦标签不代表摩擦为零：Gazebo 会采用默认参数。测试脚本显式设置两侧接触材质以便对照。
+
+`--profile baseline` 可重现旧 TCP / 朝向 / 搬运高度及旧测试点；`--profile ground` 使用地面小物块诊断参数。默认 `current` 使用当前源码 YAML 和地面测试点。
+
+`--tcp-z`、`--compression`、`--contact-layer` 只覆盖本次测试文件，不写回生产参数。报告须注明覆盖项，不能将实验参数下的通过结果视为默认配置通过。
+
+`--mode headless` 不启动窗口；`--mode gui` 启动 Gazebo 客户端和 RViz，需有可用图形桌面。测试世界的默认相机已改为抓取区近景。报告在 PICKING / TRANSFERRING / PLACING 阶段记录实际夹爪关节及物块相对指尖的位置，并统计双指接触采样。
+
+本套测试不验证相机分割、定位精度或实机安全功能。无显示服务器时 Gazebo 可能停用相机渲染，但关节控制和物理状态查询仍可用于执行器测试。
+
+## 12. 执行器检测结果
+
+日期：2026-10-28。环境：Ubuntu 22.04 / ROS 2 Humble / Gazebo Classic 11，Fast DDS，独立 ROS 域 93 和 Gazebo 端口 11493。
+
+### 问题与修复
+
+旧配置的运动序列成功，但物块基本留在原位，放置误差约 80 mm。增大物块、提高摩擦或单独缩小闭合开口都未解决问题。新增的接触传感器确认双指已经碰到物块。
+
+旧 Gazebo `position` 接口在写入时直接调用 `SetPosition` 并将关节速度设为零；`position_pid` 则根据位置误差施加力，见 [gazebo_ros2_control 0.4.10 实现](https://github.com/ros-controls/gazebo_ros2_control/blob/0.4.10/gazebo_ros2_control/src/gazebo_system.cpp#L786-L806)。对照实验表明，修正驱动方式后，物块能够随夹爪抬升、搬运并放下。
+
+当前仿真配置：
+
+- `gazebo_piper.ros2_control.urdf`：机械臂使用 velocity 命令接口；双指使用 position_pid，P=1000、I=0、D=5。Gazebo 对外仍导出夹爪 position 接口。
+- `ros2_controllers.yaml`：机械臂轨迹控制器按位置误差输出速度，P=20；当前版本未配置的速度前馈系数默认为 0，因此没有叠加轨迹速度。控制周期为 1000 Hz。
+- `manipulation.yaml` 与 C++ 默认值：总闭合余量从 0.4 mm 调为 2 mm。例如 30 mm 物块的目标开口为 28 mm；接触后实际开口停在物块宽度附近，由 PID 形成夹持力。
+- 双指 mu / mu2 显式设为 1.0。TCP 使用 `[0, 0, 0.132] m`，世界接触参数采用 `room.world` 默认值。
+
+这些调整作用于当前 Gazebo 驱动配置。Piper_x 实机仍需使用对应驱动并标定 TCP、夹持力。
+
+### 默认配置回归
+
+以下正式复测均使用源码默认 TCP、闭合余量和接触参数：
+
+| 检查 | 结果 |
+| --- | --- |
+| MotionController 输入与实际运动 | 15 / 15 通过 |
+| Action 无效目标、错误时间戳、忙碌拒绝、步间取消 | 4 / 4 通过 |
+| 空载抓放序列及四阶段反馈 | 通过 |
+| Headless，3 cm / 27 g 物块 | 抬升 64.27 mm，放置误差 0.069 mm，通过 |
+| GUI，1 cm / 1 g 原始尺寸物块 | 抬升 75.08 mm，放置误差 0.107 mm，通过 |
+
+MotionController 回归中，机械臂最大关节误差约 0.00309 rad，夹爪约 0.0000963 m，位姿最大位置误差约 0.443 mm，均在测试门槛内。物块位移来自 Gazebo 实际物理状态；误差数值是仿真测量，不代表实机精度。
+
+日志和报告：
+
+- `log/executor_validation/grasp_fixed_full/`：完整 headless 回归，包含 motion.json、report.json 和轨迹。
+- `log/executor_validation/grasp_fixed_gui_1cm/`：GUI 抓放，包含 controllers.yaml、接触记录和实际夹爪宽度。
+- `log/executor_validation/diagnose_contacts/`：旧驱动下的接触诊断，双指有接触但未抬起物块。
+
+GUI 复测在虚拟显示器中启动 Gazebo 和 RViz。抓放完成后的 SIGINT 清理阶段，RViz 出现退出崩溃日志；该问题独立于已经通过的抓放过程。
+
+### 验收范围
+
+当前通过的是指定地面位置的单物块抓放，物理验收为抬升超过 4 cm、最终放置误差小于 2 cm。Action success 仍表示运动序列完成，真实抓放是否通过由测试脚本的 physical 结果判断。
+
+任务节点及接口现已实现，见第 13 节。此处物理抓放报告仍只覆盖单物块执行器；没有验证视觉三物块闭环与实机控制。
+
+## 13. 任务规划器与分拣接口
+
+`task_planner.cpp` 负责选择目标和组织执行顺序，MoveIt 继续负责运动轨迹规划。任务节点不依赖 Gazebo 真值，也不直接控制关节。
+
+```text
+color_detector → depth_localizer → /perception/objects
+                                         ↓
+客户端 → /sorting/sort_objects → task_planner
+                                         ↓ /manipulation/pick_place
+                                pick_place_executor → MotionController → MoveIt
+```
+
+接口文件：
+
+| 文件 | 字段与作用 |
+| --- | --- |
+| DetectedObject.msg | object_id、color、pose、dimensions；pose 是物体中心 |
+| DetectedObjectArray.msg | header + objects；同一帧共用采集时间及坐标系 |
+| SortObjects.action Goal | strategy、color_order |
+| SortObjects.action Result | success、message |
+| SortObjects.action Feedback | current_object_id、completed_count |
+
+主仿真 launch 默认启动规划器，收到 Action 才执行。已有仿真也可以单独启动任务节点，两种启动方式选择一种：
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+# RMW_IMPLEMENTATION 沿用终端配置，项目不再强制切换。
+export ROS_LOCALHOST_ONLY=1
+ros2 launch my_robot_planner task_planner.launch.py
+# 实机或独立接口测试使用 use_sim_time:=false。
+```
+
+在 `src/my_robot_planner/config/task_planner.yaml` 配置放置中心位置。默认位置使用 base_link，Z=0.005 m 对应地面上的 1 cm 物块；更换尺寸、支撑高度时应同步修改 `perception.yaml` 的 object_dimensions 和放置位置 Z。距离策略使用的 tool_to_tcp 需与 manipulation.yaml 标定一致。
+
+确认相机能看见工作区、定位列表稳定，并在启动终端使用相同的 RMW / ROS 域设置：
+
+```bash
+# RMW_IMPLEMENTATION 沿用终端配置，项目不再强制切换。
+export ROS_LOCALHOST_ONLY=1
+ros2 topic echo /perception/objects --once
+
+# 按蓝、红、绿顺序抓取；该命令会触发机械臂运动。
+ros2 action send_goal /sorting/sort_objects my_robot_interface/action/SortObjects \
+  '{strategy: color_order, color_order: [3, 1, 2]}' --feedback
+
+# 在红、绿、蓝候选中，每次选择距离当前 TCP 最近的物块。
+ros2 action send_goal /sorting/sort_objects my_robot_interface/action/SortObjects \
+  '{strategy: nearest, color_order: [1, 2, 3]}' --feedback
+```
+
+strategy 为空时使用 default_strategy，color_order 为空时使用 default_color_order。color_order 同时决定参与任务的颜色；例如 `[1]` 只抓红色。列表不允许重复颜色。收到任务后先等待所需颜色齐全，再固定本批 object_id；执行前从最新观测刷新位姿，已完成 ID 不会在本批重复加入。
+
+color_order 策略在前一种颜色暂时丢失时等待它，保持指定顺序。nearest 每次重新查询当前 TCP 并计算三维距离，不使用初始位置一次性排完整批次。扩展策略主要修改 validPolicy / selectTarget；批次管理与 PickPlace 调用可继续复用。
+
+任务等待与执行使用异步回调，不阻塞 ROS executor。并行任务被拒绝；PickPlace 拒绝/失败会终止本批后续目标。目标或 TF 暂不可用时等待，超过 observation_timeout 后终止；观测采集时间及接收时间均受 max_observation_age 约束。零采集时间允许手工输入，但仍检查接收时间。
+
+分拣取消会转发给当前 PickPlace，等待它返回后结束任务，不再派发下一物块。执行器仍在当前同步动作结束后处理取消。上层客户端可调用 SortObjects goal handle 的 cancel_goal_async()；这不代表立即停止运动。
+
+腕部相机在初始位和搬运后可能看不到物块。规划器现在在每次抓取前，通过 /manipulation/move_to_named 请求执行器到 observation_target（默认 pose_1），等待 observation_settle_time 后的新图像再选择目标；不会使用移动前的观测。固定外部相机可将 observation_target 设为空字符串。任务 success 代表本批运动流程完成，尚未加入抓后视觉复核或自动碰撞场景管理。
+
+### 接口与策略测试
+
+工作区根目录执行：
+
+```bash
+python3 test/planner_check.py
+# 只复测深度中心转换：
+python3 test/planner_check.py PlannerChecks.test_depth_surface_to_center
+```
+
+该脚本使用独立 ROS 域 94、模拟 PickPlace 执行端与合成深度图，不连接机械臂，也不创建 ROS 包。测试输出位于 `log/planner_validation/<时间>/`。测试中的 0.60 m 放置点仅用于验证距离重算，不发送给实际机械臂。
+
+2026-10-28：13 项测试全部通过，覆盖颜色顺序/默认参数、距离重算、位姿刷新、忙碌拒绝和取消转发、失败/拒绝停止、错误策略、缺失/过期观测、顺序保持、物体 TF 转换、重复 ID，以及 32FC1 / 16UC1 深度的物体中心转换、最大同色区域选择和空列表输出。
+
+集成新节点后，原有 1 cm 物块 headless 抓放回归也通过：抬升 75.10 mm、放置误差 0.020 mm；日志位于 `log/executor_validation/task_planner_bringup_regression/`。此回归通过手动单物体目标检查执行器兼容性，没有发送三色分拣任务。
+
+完整三色视觉分拣的实际成功率、相机噪声下定位误差、观察姿态和碰撞场景仍需后续验收。
+
+
+## 14. 一键视觉分拣与观察位
+
+脚本位于 `test/run_sorting.sh`。先构建一次，再从工作区根目录运行：
+
+```bash
+source /opt/ros/humble/setup.bash
+colcon build --packages-up-to my_robot_bringup my_robot_sim
+./test/run_sorting.sh gui color_order 3,1,2
+# 无窗口运行；无 DISPLAY 时使用 xvfb-run 保留深度相机渲染。
+./test/run_sorting.sh headless nearest
+```
+
+默认参数为 gui / color_order / 1,2,3。GUI 模式在任务结束后保留窗口，Ctrl+C 清理本脚本启动的仿真。测试独占 ROS 域 95 和 Gazebo 端口 11495；输出位于 `log/sorting/<时间>/`。不需要另外启动原 Gazebo launch 或 spawn launch。
+
+脚本继承终端的 RMW，使用本机通信和域 95；用 ./ 或 bash 执行不会修改父终端。要在另一个终端查询本次仿真，先 source 脚本打印的 `log/sorting/<时间>/ros_env.sh`，再运行 `ros2 node list --no-daemon`。环境文件记录实际继承的 RMW；未设置时保持 ROS 默认实现。只设置 RMW 而保留域 0，无法查询域 95 的节点。脚本结束后仿真节点会被清理，此时查到空列表是正常结果。
+
+普通 `ros2 node list` 使用 CLI daemon。更换 RMW 后，已启动 daemon 不会自动切换实现；应在对应 ROS 域停止旧 daemon，再以统一环境启动查询，见 [ROS 2 官方排查说明](https://github.com/ros2/ros2_documentation/blob/humble/source/How-To-Guides/Working-with-multiple-RMW-implementations.rst#ensuring-use-of-a-particular-rmw-implementation)。2026-10-29 的本机诊断还发现默认 Cyclone/非 localhost 发现会卡住，而 localhost 直接发现与 Fast DDS 直接发现可正常返回；这不意味着所有 Cyclone 安装都有同样问题。
+
+脚本生成三色 1 cm 物块：X=0.30 m，Y=-0.06/0/0.06 m；测试放置区 X=0.26 m，Y 保持三处间隔。测试参数副本位于日志目录，源模型与默认放置位置不被覆盖。`bringup.log` 记录节点日志，`task.log` 记录反馈，`vision_latest.png` 保存最近一次视觉调试图，`report.json` 区分任务返回结果与物块实际抬升/放置结果。Gazebo 真值查询仅用于测试验收，规划器仍使用视觉结果。
+
+### 信息传递顺序
+
+1. 脚本启动 Gazebo、MoveIt、控制器、感知和任务节点，等待控制器 active，再通过 spawn_entity 生成物块。
+2. 脚本向 `/sorting/sort_objects` 发送 SortObjects：策略和颜色列表。
+3. task_planner 向 `/manipulation/move_to_named` 发送 MoveToNamed：`target=pose_1`。pick_place_executor 通过 MotionController 和 MoveIt 移到观察位。
+4. 相机发布 RGB、深度和 CameraInfo；color_detector 发布 `/perception/color_labels`。depth_localizer 将标签与深度按时间匹配，结合内参和采集时刻 TF，发布 `/perception/objects` 中的物体中心列表。
+5. task_planner 等待到位且稳定后的新图像，根据策略选中物体，并把 object_pose、dimensions 和 YAML 对应的 place_pose 组成 PickPlace，发给 `/manipulation/pick_place`。
+6. pick_place_executor 按接近、夹紧、抬升、搬运、释放的顺序调用 MotionController；MoveIt 规划轨迹并通过 FollowJointTrajectory 发给 arm_controller / gripper_controller。
+7. ros2_control 驱动 Gazebo 关节；joint_states 经 robot_state_publisher 更新 TF，供 MoveIt 状态反馈和相机坐标转换使用。
+8. PickPlace 返回后，规划器更新完成计数；还有目标则返回观察位重新定位。SortObjects 将当前目标与完成数反馈给脚本，全部结束后返回结果。
+
+### 为什么需要观察位
+
+当前相机安装在腕部。按模型计算，home 位的光轴偏向前方，当前地面物块落在垂直视场之外；pose_1 的相机光轴接近向下，可覆盖脚本工作区。观察位名称配置在 task_planner.yaml，具体关节角在 piper.srdf；运动由执行器统一完成，与 PickPlace 共用忙碌锁，避免同时控制机械臂。
+
+MoveToNamed 的取消在当前同步运动结束后生效。观察运动失败或被拒绝时，不开始抓取。需要更换场景时，应重新校准观察姿态、视场、遮挡与相机最小测距。
+
+本次还修复了两个视觉链路问题：定位允许等待 0.1 s 以接收采集时刻对应的 TF；仿真相机显式设置 min_depth=0.05、max_depth=3.0，与定位范围一致。相机插件默认 min_depth=0.4 m 会过滤当前近距离物块，见 [Gazebo 相机插件实现](https://github.com/ros-simulation/gazebo_ros_pkgs/blob/ros2/gazebo_plugins/src/gazebo_ros_camera.cpp#L432-L435)。这些是仿真设置，实机观察距离仍应符合实际深度相机能力。
+
+2026-10-29：新增观察位失败、取消和旧图像拒绝测试，任务与感知检查共 16 项通过。测试脚本移动到 test/ 后，已同步修正其工作区路径定位。
+
+
+### 本次三色视觉分拣验证
+
+2026-10-29 使用 `./test/run_sorting.sh headless color_order 1,2,3`，真实相机图像与深度定位驱动抓放，三个物块全部通过物理验收：
+
+| 物块 | 最大抬升 | 最终放置误差 |
+| --- | --- | --- |
+| 红色 | 75.97 mm | 0.530 mm |
+| 绿色 | 75.56 mm | 0.489 mm |
+| 蓝色 | 76.07 mm | 0.506 mm |
+
+报告位于 `log/sorting/20261029_171641/report.json`。该结果覆盖脚本定义的三色 1 cm 地面场景，是一次仿真闭环通过记录，不代表任意摆放、任意相机或实机精度。16 项任务接口测试通过，TF 等待调整后的深度中心转换复测也通过。

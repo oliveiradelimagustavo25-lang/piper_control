@@ -6,62 +6,78 @@
             </plugin>
         </gazebo>
 
+        <gazebo reference="link7">
+            <mu1>1.0</mu1>
+            <mu2>1.0</mu2>
+        </gazebo>
+        <gazebo reference="link8">
+            <mu1>1.0</mu1>
+            <mu2>1.0</mu2>
+        </gazebo>
+
         <ros2_control name="Arm" type="system">
             <hardware>
                 <!-- By default, set up controllers for simulation. This won't work on real hardware -->
                 <plugin>gazebo_ros2_control/GazeboSystem</plugin>
             </hardware>
             <joint name="joint7">
-                <command_interface name="position"/>
+                <!-- 用位置误差产生夹持力，接触物块后允许停在目标开口之外。 -->
+                <command_interface name="position_pid"/>
+                <param name="pos_kp">1000.0</param>
+                <param name="pos_ki">0.0</param>
+                <param name="pos_kd">5.0</param>
                 <state_interface name="position">
                   <param name="initial_value">0.01</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
             <joint name="joint8">
-                <command_interface name="position"/>
+                <command_interface name="position_pid"/>
+                <param name="pos_kp">1000.0</param>
+                <param name="pos_ki">0.0</param>
+                <param name="pos_kd">5.0</param>
                 <state_interface name="position">
                   <param name="initial_value">-0.01</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
             <joint name="joint1">
-                <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">0.0</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint> 
             <joint name="joint2">
-                <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">0.0</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
             <joint name="joint3">
-                <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">0.0</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
             <joint name="joint4">
-                <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">0.0</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
             <joint name="joint5">
-                <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">0.0</param>
                 </state_interface>
                 <state_interface name="velocity"/>
             </joint>
             <joint name="joint6">
-                <command_interface name="position"/>
+                <command_interface name="velocity"/>
                 <state_interface name="position">
                   <param name="initial_value">0.0</param>
                 </state_interface>

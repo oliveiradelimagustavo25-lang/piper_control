@@ -28,6 +28,11 @@ depth_localizer:
     camera_info_topic: /camera_sensor/camera_info
     points_topic: /perception/object_points
     target_frame: ""             # 空字符串：相机光学系；可改为 base_link
+    objects_topic: /perception/objects
+    objects_frame: base_link     # Z 轴向上的坐标系，物体中心位姿使用此坐标系
+    object_dimensions: [0.01, 0.01, 0.01]  # 当前三色物块的已知尺寸，m
+    top_surface_tolerance: 0.002 # 上部点的高度容差，m；要求物块平放且顶部可见
+    tf_timeout: 0.1              # s，等待采集时刻的 TF 到达，避免图像略早于关节 TF
     sync_slop: 0.03               # RGB 标签与深度时间差上限，单位 s
     min_depth: 0.05               # 单位 m
     max_depth: 3.0

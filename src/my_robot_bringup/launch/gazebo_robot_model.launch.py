@@ -39,14 +39,14 @@ def generate_launch_description():
             get_package_share_directory('my_robot_commander'), 'config', 'manipulation.yaml')),
         DeclareLaunchArgument('use_pick_place', default_value='true',
                               description='Use the Action executor; false selects the Topic debug node.'),
+        DeclareLaunchArgument('use_task_planner', default_value=LaunchConfiguration('use_pick_place')),
+        DeclareLaunchArgument('task_planner_config', default_value=os.path.join(
+            get_package_share_directory('my_robot_planner'), 'config', 'task_planner.yaml')),
         DeclareLaunchArgument('robot_model', default_value=os.path.join(
             robot_path, 'urdf', 'gazebo_piper_description.xacro')),
-        # 仅作用于本 launch 的子进程，不修改用户 Shell 配置。
-        DeclareLaunchArgument('rmw_implementation', default_value='rmw_fastrtps_cpp'),
         DeclareLaunchArgument('localhost_only', default_value='1'),
     ]
     environment = [
-        SetEnvironmentVariable('RMW_IMPLEMENTATION', LaunchConfiguration('rmw_implementation')),
         SetEnvironmentVariable('ROS_LOCALHOST_ONLY', LaunchConfiguration('localhost_only')),
         SetEnvironmentVariable('GAZEBO_MODEL_PATH', os.pathsep.join(filter(None, [
             '/usr/share/gazebo-11/models',
@@ -119,4 +119,7 @@ def generate_launch_description():
         Node(package='my_robot_commander', executable='pick_place_executor', output='screen',
              condition=IfCondition(LaunchConfiguration('use_pick_place')),
              parameters=moveit_params + [LaunchConfiguration('manipulation_config')]),
+        Node(package='my_robot_planner', executable='task_planner', output='screen',
+             condition=IfCondition(LaunchConfiguration('use_task_planner')),
+             parameters=[LaunchConfiguration('task_planner_config'), {'use_sim_time': True}]),
     ] + perception)

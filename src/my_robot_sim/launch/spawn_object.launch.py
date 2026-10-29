@@ -12,7 +12,6 @@ def generate_launch_description():
     model = LaunchConfiguration('model')
 
     arguments = [
-        DeclareLaunchArgument('rmw_implementation', default_value='rmw_fastrtps_cpp'),
         DeclareLaunchArgument('localhost_only', default_value='1'),
         DeclareLaunchArgument(
             'model', default_value='blue_cube',
@@ -54,7 +53,6 @@ def generate_launch_description():
         ],
     )
     return LaunchDescription(arguments + [
-        SetEnvironmentVariable('RMW_IMPLEMENTATION', LaunchConfiguration('rmw_implementation')),
         SetEnvironmentVariable('ROS_LOCALHOST_ONLY', LaunchConfiguration('localhost_only')),
         model_environment, spawn,
     ])

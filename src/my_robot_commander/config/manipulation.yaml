@@ -1,6 +1,7 @@
 pick_place_executor:
   ros__parameters:
     action_name: /manipulation/pick_place
+    move_to_named_action: /manipulation/move_to_named
     reference_frame: base_link
     arm_group: arm
     gripper_group: gripper
@@ -11,7 +12,7 @@ pick_place_executor:
     planning_time: 5.0
     cartesian_step: 0.005         # m，下降和抬升使用直线路径
 
-    # link6 到夹持中心的平移，在 link6 坐标系表达；由当前网格估算，物理夹持仍待调试。
+    # link6 到夹持中心的平移；已通过当前 1 cm / 3 cm 物块仿真，实机需标定。
     tool_to_tcp: [0.0, 0.0, 0.132]
     grasp_rpy: [0.0, 3.141592653589793, 0.0]  # rad，固定向下抓取
     grasp_offset: [0.0, 0.0, 0.0]  # 物块中心到夹持中心，基座坐标系，m
@@ -24,7 +25,7 @@ pick_place_executor:
 
     # 当前 Piper 两个手指：joint7=q，joint8=-q，开口宽度约为 2*q。
     gripper_open_width: 0.07
-    gripper_compression: 0.0004  # 闭合目标比物块宽度小一点，需接触测试调节
+    gripper_compression: 0.002   # 总开口比物块小 2 mm，每侧 1 mm 的目标余量形成夹持力
     gripper_joint_signs: [1.0, -1.0]  # 顺序必须对应 gripper 组的变量顺序
 
     max_target_age: 5.0          # 有时间戳的观测允许年龄，s；零时间戳用于手动目标

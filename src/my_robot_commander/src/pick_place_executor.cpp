@@ -10,6 +10,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <my_robot_interface/action/pick_place.hpp>
+#include <my_robot_interface/action/move_to_named.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <tf2/LinearMath/Matrix3x3.hpp>
@@ -70,6 +71,8 @@ class PickPlaceExecutor
 {
   using Action = my_robot_interface::action::PickPlace;
   using GoalHandle = rclcpp_action::ServerGoalHandle<Action>;
+  using NamedAction = my_robot_interface::action::MoveToNamed;
+  using NamedHandle = rclcpp_action::ServerGoalHandle<NamedAction>;
   using Motion = my_robot_commander::MotionController;
 
 public:
@@ -96,7 +99,7 @@ public:
     clearance_ = parameter(node_, "release_clearance", 0.002);
     retreat_ = parameter(node_, "retreat_distance", 0.04);
     open_width_ = parameter(node_, "gripper_open_width", 0.07);
-    compression_ = parameter(node_, "gripper_compression", 0.0004);
+    compression_ = parameter(node_, "gripper_compression", 0.002);
     signs_ = parameter<std::vector<double>>(node_, "gripper_joint_signs", {1.0, -1.0});
     max_age_ = parameter(node_, "max_target_age", 5.0);
     tf_timeout_ = parameter(node_, "tf_timeout", 0.3);
@@ -127,6 +130,19 @@ public:
         worker_ = std::thread([this, handle]() { execute(handle); });
       });
     RCLCPP_INFO(node_->get_logger(), "PickPlace executor ready: %s", name.c_str());
+    named_server_ = rclcpp_action::create_server<NamedAction>(node_,
+      parameter<std::string>(node_, "move_to_named_action", "/manipulation/move_to_named"),
+      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const NamedAction::Goal> goal) {
+        if (goal->target.empty() || busy_.exchange(true)) {
+          return rclcpp_action::GoalResponse::REJECT;
+        }
+        return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+      },
+      [](std::shared_ptr<NamedHandle>) { return rclcpp_action::CancelResponse::ACCEPT; },
+      [this](std::shared_ptr<NamedHandle> handle) {
+        if (worker_.joinable()) { worker_.join(); }
+        worker_ = std::thread([this, handle]() { executeNamed(handle); });
+      });
   }
 
   ~PickPlaceExecutor()
@@ -137,6 +153,31 @@ public:
   }
 
 private:
+  void executeNamed(const std::shared_ptr<NamedHandle> & handle)
+  {
+    auto result = std::make_shared<NamedAction::Result>();
+    try {
+      if (!handle->is_canceling()) {
+        result->success = motion_->moveToNamedTarget(handle->get_goal()->target);
+      }
+      result->message = result->success ? "Named target reached" : "Named motion failed";
+    } catch (const std::exception & error) {
+      result->message = error.what();
+    }
+    if (rclcpp::ok()) {
+      if (handle->is_canceling()) {
+        result->success = false;
+        result->message = "Canceled after current named motion";
+        handle->canceled(result);
+      } else if (result->success) {
+        handle->succeed(result);
+      } else {
+        handle->abort(result);
+      }
+    }
+    busy_ = false;
+  }
+
   bool validGoal(const Action::Goal & goal) const
   {
     const auto pose_valid = [](const geometry_msgs::msg::PoseStamped & p) {
@@ -270,6 +311,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
   std::unique_ptr<Motion> motion_;
   rclcpp_action::Server<Action>::SharedPtr server_;
+  rclcpp_action::Server<NamedAction>::SharedPtr named_server_;
   std::thread worker_;
   std::atomic<bool> busy_{false};
   std::string frame_;
