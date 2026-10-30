@@ -31,9 +31,13 @@ my_robot_commander::MotionController::Options motionOptions(const rclcpp::Node::
   options.reference_frame = parameter(node, "reference_frame", options.reference_frame);
   options.end_effector_link = parameter(node, "end_effector_link", options.end_effector_link);
   options.gripper_open_target = parameter(node, "gripper_open_target", options.gripper_open_target);
-  options.gripper_close_target = parameter(node, "gripper_close_target", options.gripper_close_target);
+  options.gripper_close_target = parameter(
+    node, "gripper_close_target",
+    options.gripper_close_target);
   options.velocity_scaling = parameter(node, "velocity_scaling", options.velocity_scaling);
-  options.acceleration_scaling = parameter(node, "acceleration_scaling", options.acceleration_scaling);
+  options.acceleration_scaling = parameter(
+    node, "acceleration_scaling",
+    options.acceleration_scaling);
   options.planning_time = parameter(node, "planning_time", options.planning_time);
   options.cartesian_step = parameter(node, "cartesian_step", options.cartesian_step);
   return options;
@@ -70,8 +74,8 @@ public:
           return;
         }
         motion_.moveToPose(
-            std::array<double, 3>{msg->position[0], msg->position[1], msg->position[2]},
-            std::array<double, 3>{msg->radian[0], msg->radian[1], msg->radian[2]}, msg->cartesian);
+          std::array<double, 3>{msg->position[0], msg->position[1], msg->position[2]},
+          std::array<double, 3>{msg->radian[0], msg->radian[1], msg->radian[2]}, msg->cartesian);
       });
   }
 
@@ -94,12 +98,12 @@ int main(int argc, char ** argv)
   executor.add_node(node);
   int result = 0;
   std::thread spin_thread([&]() {
-    try {
-      executor.spin();
-    } catch (const std::exception & error) {
-      RCLCPP_ERROR(node->get_logger(), "Executor stopped: %s", error.what());
-    }
-  });
+      try {
+        executor.spin();
+      } catch (const std::exception & error) {
+        RCLCPP_ERROR(node->get_logger(), "Executor stopped: %s", error.what());
+      }
+    });
   try {
     Commander commander(node);
     RCLCPP_INFO(node->get_logger(), "Commander ready");

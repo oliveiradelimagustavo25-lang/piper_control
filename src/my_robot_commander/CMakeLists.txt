@@ -14,6 +14,9 @@ find_package(moveit_msgs REQUIRED)
 find_package(example_interfaces REQUIRED)
 find_package(my_robot_interface REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
+find_package(moveit_core REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -24,18 +27,26 @@ target_include_directories(motion_controller PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
 ament_target_dependencies(motion_controller
-  rclcpp geometry_msgs moveit_msgs moveit_ros_planning_interface tf2)
+  rclcpp rclcpp_action geometry_msgs moveit_msgs moveit_ros_planning_interface tf2)
+
+add_library(pick_place_scene SHARED src/pick_place_scene.cpp)
+target_compile_features(pick_place_scene PUBLIC cxx_std_17)
+target_include_directories(pick_place_scene PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(pick_place_scene
+  rclcpp geometry_msgs moveit_msgs moveit_ros_planning_interface my_robot_interface
+  shape_msgs moveit_core tf2 tf2_ros tf2_geometry_msgs)
 
 add_executable(commander src/commander.cpp)
 target_link_libraries(commander motion_controller)
-
-
 ament_target_dependencies(commander rclcpp example_interfaces my_robot_interface)
 
 add_executable(pick_place_executor src/pick_place_executor.cpp)
-target_link_libraries(pick_place_executor motion_controller)
+target_link_libraries(pick_place_executor motion_controller pick_place_scene)
 ament_target_dependencies(pick_place_executor
-  rclcpp rclcpp_action my_robot_interface geometry_msgs tf2 tf2_ros tf2_geometry_msgs)
+  rclcpp rclcpp_action my_robot_interface geometry_msgs shape_msgs std_srvs moveit_core
+  tf2 tf2_ros tf2_geometry_msgs)
 install(TARGETS commander pick_place_executor DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
@@ -45,7 +56,14 @@ install(TARGETS motion_controller EXPORT export_motion_controller
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin)
 ament_export_targets(export_motion_controller HAS_LIBRARY_TARGET)
-ament_export_dependencies(rclcpp geometry_msgs moveit_msgs moveit_ros_planning_interface tf2)
+install(TARGETS pick_place_scene EXPORT export_pick_place_scene
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+ament_export_targets(export_pick_place_scene HAS_LIBRARY_TARGET)
+ament_export_dependencies(
+  rclcpp rclcpp_action geometry_msgs moveit_msgs moveit_ros_planning_interface
+  my_robot_interface shape_msgs moveit_core tf2 tf2_ros tf2_geometry_msgs)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

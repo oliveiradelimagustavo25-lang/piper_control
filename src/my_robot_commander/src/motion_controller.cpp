@@ -1,12 +1,16 @@
 #include "my_robot_commander/motion_controller.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
 
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
+#include <moveit_msgs/action/execute_trajectory.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
 
 namespace my_robot_commander
@@ -30,6 +34,9 @@ struct MotionController::Impl
   std::unique_ptr<Group> arm;
   std::unique_ptr<Group> gripper;
   std::mutex mutex;
+  std::atomic<bool> stop_requested{false};
+  using Execute = moveit_msgs::action::ExecuteTrajectory;
+  rclcpp_action::Client<Execute>::SharedPtr execution_client;
 
   Impl(const rclcpp::Node::SharedPtr & input_node, const Options & input_options)
   : node(input_node), options(input_options)
@@ -46,6 +53,7 @@ struct MotionController::Impl
     }
     arm = std::make_unique<Group>(node, options.arm_group);
     gripper = std::make_unique<Group>(node, options.gripper_group);
+    execution_client = rclcpp_action::create_client<Execute>(node, "execute_trajectory");
     for (auto * group : {arm.get(), gripper.get()}) {
       group->setMaxVelocityScalingFactor(options.velocity_scaling);
       group->setMaxAccelerationScalingFactor(options.acceleration_scaling);
@@ -61,18 +69,42 @@ struct MotionController::Impl
 
   bool planAndExecute(Group & group)
   {
+    if (stop_requested) {return false;}
     Group::Plan plan;
     const auto planned = group.plan(plan);
     if (planned != moveit::core::MoveItErrorCode::SUCCESS) {
       RCLCPP_ERROR(node->get_logger(), "Planning failed, MoveIt code: %d", planned.val);
       return false;
     }
-    const auto executed = group.execute(plan);
-    if (executed != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(node->get_logger(), "Execution failed, MoveIt code: %d", executed.val);
-      return false;
+    return execute(plan.trajectory_);
+  }
+
+  bool execute(const moveit_msgs::msg::RobotTrajectory & trajectory)
+  {
+    using namespace std::chrono_literals;
+    if (stop_requested || !execution_client->wait_for_action_server(2s)) {return false;}
+    Execute::Goal goal;
+    goal.trajectory = trajectory;
+    auto accepted = execution_client->async_send_goal(goal);
+    while (rclcpp::ok() && accepted.wait_for(20ms) != std::future_status::ready) {}
+    if (!rclcpp::ok()) {return false;}
+    const auto handle = accepted.get();
+    if (!handle) {return false;}
+    auto result = execution_client->async_get_result(handle);
+    bool cancel_sent = false;
+    while (rclcpp::ok() && result.wait_for(20ms) != std::future_status::ready) {
+      if (stop_requested && !cancel_sent) {
+        // Humble 的 ExecuteTrajectory 取消回调可能被同步执行阻塞。
+        // stop 事件直接交给轨迹执行管理器；拿到句柄后再发一次以覆盖发送目标时的竞态。
+        arm->stop();
+        execution_client->async_cancel_goal(handle);
+        cancel_sent = true;
+      }
     }
-    return true;
+    if (!rclcpp::ok()) {return false;}
+    const auto outcome = result.get();
+    return !stop_requested && outcome.code == rclcpp_action::ResultCode::SUCCEEDED &&
+           outcome.result->error_code.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
   }
 
   bool namedTarget(Group & group, const std::string & name)
@@ -106,7 +138,7 @@ bool MotionController::moveToJoints(const std::vector<double> & joints)
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto & arm = *impl_->arm;
   if (joints.size() != arm.getVariableCount() ||
-    !std::all_of(joints.begin(), joints.end(), [](double v) { return std::isfinite(v); }))
+    !std::all_of(joints.begin(), joints.end(), [](double v) {return std::isfinite(v);}))
   {
     RCLCPP_ERROR(impl_->node->get_logger(), "Invalid joint count or non-finite joint value");
     return false;
@@ -161,9 +193,11 @@ bool MotionController::moveToPose(const geometry_msgs::msg::PoseStamped & pose, 
       RCLCPP_ERROR(impl_->node->get_logger(), "MoveIt rejected pose target");
     }
   } else {
+    if (impl_->stop_requested) {return false;}
     // Cartesian API 的 waypoints 不含 Header，必须明确在统一参考系下输入。
     if (target.header.frame_id != impl_->options.reference_frame) {
-      RCLCPP_ERROR(impl_->node->get_logger(), "Cartesian target must be in %s",
+      RCLCPP_ERROR(
+        impl_->node->get_logger(), "Cartesian target must be in %s",
         impl_->options.reference_frame.c_str());
       return false;
     }
@@ -171,11 +205,7 @@ bool MotionController::moveToPose(const geometry_msgs::msg::PoseStamped & pose, 
     const double fraction = arm.computeCartesianPath(
       {target.pose}, impl_->options.cartesian_step, 0.0, trajectory, true);
     if (fraction >= 1.0 - 1e-6 && !trajectory.joint_trajectory.points.empty()) {
-      const auto executed = arm.execute(trajectory);
-      success = executed == moveit::core::MoveItErrorCode::SUCCESS;
-      if (!success) {
-        RCLCPP_ERROR(impl_->node->get_logger(), "Cartesian execution failed: %d", executed.val);
-      }
+      success = impl_->execute(trajectory);
     } else {
       RCLCPP_ERROR(impl_->node->get_logger(), "Cartesian path incomplete: %.1f%%", fraction * 100);
     }
@@ -200,7 +230,7 @@ bool MotionController::moveGripperToJoints(const std::vector<double> & joints)
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto & gripper = *impl_->gripper;
   if (joints.size() != gripper.getVariableCount() ||
-    !std::all_of(joints.begin(), joints.end(), [](double v) { return std::isfinite(v); }))
+    !std::all_of(joints.begin(), joints.end(), [](double v) {return std::isfinite(v);}))
   {
     RCLCPP_ERROR(impl_->node->get_logger(), "Invalid gripper joint target");
     return false;
@@ -216,6 +246,18 @@ bool MotionController::moveGripperToJoints(const std::vector<double> & joints)
 bool MotionController::closeGripper()
 {
   return moveGripperToNamedTarget(impl_->options.gripper_close_target);
+}
+
+void MotionController::stop()
+{
+  // 不取运动互斥锁：执行线程可能正在等待轨迹结果。
+  impl_->stop_requested = true;
+  impl_->arm->stop();
+}
+
+void MotionController::clearStop()
+{
+  impl_->stop_requested = false;
 }
 
 }  // namespace my_robot_commander

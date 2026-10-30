@@ -3,6 +3,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -13,6 +14,7 @@
 #include <my_robot_interface/action/move_to_named.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Matrix3x3.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -20,6 +22,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "my_robot_commander/motion_controller.hpp"
+#include "my_robot_commander/pick_place_scene.hpp"
 
 namespace
 {
@@ -54,7 +57,8 @@ geometry_msgs::msg::PoseStamped toolPose(
 }
 
 // 盒子在夹爪局部 Y（闭合方向）上的投影宽度。
-double graspWidth(const geometry_msgs::msg::Pose & object,
+double graspWidth(
+  const geometry_msgs::msg::Pose & object,
   const geometry_msgs::msg::Vector3 & dimensions, const tf2::Quaternion & tool_rotation)
 {
   tf2::Quaternion object_rotation;
@@ -74,6 +78,7 @@ class PickPlaceExecutor
   using NamedAction = my_robot_interface::action::MoveToNamed;
   using NamedHandle = rclcpp_action::ServerGoalHandle<NamedAction>;
   using Motion = my_robot_commander::MotionController;
+  using Scene = my_robot_commander::PickPlaceScene;
 
 public:
   explicit PickPlaceExecutor(const rclcpp::Node::SharedPtr & node)
@@ -85,12 +90,15 @@ public:
     frame_ = options.reference_frame = parameter(node_, "reference_frame", options.reference_frame);
     options.end_effector_link = parameter<std::string>(node_, "end_effector_link", "link6");
     options.velocity_scaling = parameter(node_, "velocity_scaling", options.velocity_scaling);
-    options.acceleration_scaling = parameter(node_, "acceleration_scaling", options.acceleration_scaling);
+    options.acceleration_scaling = parameter(
+      node_, "acceleration_scaling",
+      options.acceleration_scaling);
     options.planning_time = parameter(node_, "planning_time", options.planning_time);
     options.cartesian_step = parameter(node_, "cartesian_step", options.cartesian_step);
     tool_to_tcp_ = vector3(parameter<std::vector<double>>(node_, "tool_to_tcp", {0, 0, 0.132}));
     offset_ = vector3(parameter<std::vector<double>>(node_, "grasp_offset", {0, 0, 0}));
-    const auto rpy = vector3(parameter<std::vector<double>>(
+    const auto rpy = vector3(
+      parameter<std::vector<double>>(
         node_, "grasp_rpy", {0, 3.141592653589793, 0}));
     tool_rotation_.setRPY(rpy.x(), rpy.y(), rpy.z());
     approach_ = parameter(node_, "approach_distance", 0.04);
@@ -109,54 +117,105 @@ public:
       throw std::invalid_argument("Invalid gripper configuration or approach/lift/retreat distances");
     }
     motion_ = std::make_unique<Motion>(node_, options);
+    scene_ = std::make_unique<Scene>(node_, tf_buffer_, frame_, options.end_effector_link);
+    objects_sub_ = node_->create_subscription<my_robot_interface::msg::DetectedObjectArray>(
+      parameter<std::string>(node_, "objects_topic", "/perception/objects"), 10,
+      [this](my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr msg) {
+        std::lock_guard<std::mutex> lock(observations_mutex_);
+        observations_ = msg;
+      });
 
     const auto name = parameter<std::string>(node_, "action_name", "/manipulation/pick_place");
-    server_ = rclcpp_action::create_server<Action>(node_, name,
+    server_ = rclcpp_action::create_server<Action>(
+      node_, name,
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Action::Goal> goal) {
-        if (!validGoal(*goal) || busy_.exchange(true)) {
-          RCLCPP_WARN(node_->get_logger(), "Rejected invalid goal or executor is busy");
+        if (!validGoal(*goal) || holding_ || busy_.exchange(true)) {
+          RCLCPP_WARN(
+            node_->get_logger(),
+            "Rejected invalid/busy goal or object still held; recover before picking");
           return rclcpp_action::GoalResponse::REJECT;
         }
+        motion_->clearStop();
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
-      [](const std::shared_ptr<GoalHandle>) {
-        // 当前运动调用为同步执行：接受取消，在当前动作结束后停止后续动作。
+      [this](const std::shared_ptr<GoalHandle>) {
+        motion_->stop();
         return rclcpp_action::CancelResponse::ACCEPT;
       },
       [this](const std::shared_ptr<GoalHandle> handle) {
         if (worker_.joinable()) {
           worker_.join();
         }
-        worker_ = std::thread([this, handle]() { execute(handle); });
+        worker_ = std::thread([this, handle]() {execute(handle);});
       });
     RCLCPP_INFO(node_->get_logger(), "PickPlace executor ready: %s", name.c_str());
-    named_server_ = rclcpp_action::create_server<NamedAction>(node_,
+    named_server_ = rclcpp_action::create_server<NamedAction>(
+      node_,
       parameter<std::string>(node_, "move_to_named_action", "/manipulation/move_to_named"),
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const NamedAction::Goal> goal) {
         if (goal->target.empty() || busy_.exchange(true)) {
           return rclcpp_action::GoalResponse::REJECT;
         }
+        motion_->clearStop();
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
-      [](std::shared_ptr<NamedHandle>) { return rclcpp_action::CancelResponse::ACCEPT; },
+      [this](std::shared_ptr<NamedHandle>) {
+        motion_->stop();
+        return rclcpp_action::CancelResponse::ACCEPT;
+      },
       [this](std::shared_ptr<NamedHandle> handle) {
-        if (worker_.joinable()) { worker_.join(); }
-        worker_ = std::thread([this, handle]() { executeNamed(handle); });
+        if (worker_.joinable()) {worker_.join();}
+        worker_ = std::thread([this, handle]() {executeNamed(handle);});
       });
+    // 取消后不自动松手；用户移到安全位置后显式请求释放。
+    recovery_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    release_service_ = node_->create_service<std_srvs::srv::Trigger>(
+      "/manipulation/release_held_object",
+      [this](std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        if (busy_.exchange(true)) {
+          response->message = "Executor is busy";
+          return;
+        }
+        try {
+          motion_->clearStop();
+          if (!motion_->openGripper()) {throw std::runtime_error("Opening gripper failed");}
+          if (scene_->holding()) {scene_->release();}
+          holding_ = false;
+          scene_->restoreTouch();
+          response->success = true;
+          response->message = "Gripper opened; object returned to the world planning scene";
+        } catch (const std::exception & error) {
+          response->message = error.what();
+        }
+        busy_ = false;
+      }, rmw_qos_profile_services_default, recovery_group_);
   }
 
   ~PickPlaceExecutor()
   {
+    motion_->stop();
     if (worker_.joinable()) {
       worker_.join();
     }
   }
 
 private:
+  void syncScene()
+  {
+    my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr observations;
+    {
+      std::lock_guard<std::mutex> lock(observations_mutex_);
+      observations = observations_;
+    }
+    scene_->sync(observations);
+  }
+
   void executeNamed(const std::shared_ptr<NamedHandle> & handle)
   {
     auto result = std::make_shared<NamedAction::Result>();
     try {
+      syncScene();
       if (!handle->is_canceling()) {
         result->success = motion_->moveToNamedTarget(handle->get_goal()->target);
       }
@@ -167,7 +226,7 @@ private:
     if (rclcpp::ok()) {
       if (handle->is_canceling()) {
         result->success = false;
-        result->message = "Canceled after current named motion";
+        result->message = "Named motion canceled; current robot state retained";
         handle->canceled(result);
       } else if (result->success) {
         handle->succeed(result);
@@ -181,13 +240,13 @@ private:
   bool validGoal(const Action::Goal & goal) const
   {
     const auto pose_valid = [](const geometry_msgs::msg::PoseStamped & p) {
-      const auto & v = p.pose.position;
-      const auto & q = p.pose.orientation;
-      return !p.header.frame_id.empty() && std::isfinite(v.x) && std::isfinite(v.y) &&
-             std::isfinite(v.z) && std::isfinite(q.x) && std::isfinite(q.y) &&
-             std::isfinite(q.z) && std::isfinite(q.w) &&
-             std::hypot(std::hypot(q.x, q.y), std::hypot(q.z, q.w)) > 1e-9;
-    };
+        const auto & v = p.pose.position;
+        const auto & q = p.pose.orientation;
+        return !p.header.frame_id.empty() && std::isfinite(v.x) && std::isfinite(v.y) &&
+               std::isfinite(v.z) && std::isfinite(q.x) && std::isfinite(q.y) &&
+               std::isfinite(q.z) && std::isfinite(q.w) &&
+               std::hypot(std::hypot(q.x, q.y), std::hypot(q.z, q.w)) > 1e-9;
+      };
     const auto & d = goal.object_dimensions;
     return !goal.object_id.empty() && pose_valid(goal.object_pose) && pose_valid(goal.place_pose) &&
            std::isfinite(d.x) && d.x > 0 && std::isfinite(d.y) && d.y > 0 &&
@@ -215,35 +274,38 @@ private:
     auto result = std::make_shared<Action::Result>();
     auto feedback = std::make_shared<Action::Feedback>();
     const auto stage = [&](uint8_t value, const std::string & message) {
-      feedback->stage = value;
-      feedback->message = message;
-      if (rclcpp::ok()) {
-        handle->publish_feedback(feedback);
-      }
-    };
+        feedback->stage = value;
+        feedback->message = message;
+        if (rclcpp::ok()) {
+          handle->publish_feedback(feedback);
+        }
+      };
     const auto step = [&](const std::string & name, const std::function<bool()> & operation) {
-      if (interrupted(handle)) {
-        throw std::runtime_error("Canceled before " + name);
-      }
-      if (!operation()) {
-        throw std::runtime_error(name + " failed");
-      }
-    };
+        if (interrupted(handle)) {
+          throw std::runtime_error("Canceled before " + name);
+        }
+        if (!operation()) {
+          throw std::runtime_error(name + " failed");
+        }
+        if (interrupted(handle)) {throw std::runtime_error("Canceled during " + name);}
+      };
     const auto move = [&](const tf2::Vector3 & tcp, bool cartesian) {
-      return motion_->moveToPose(toolPose(tcp, tool_rotation_, tool_to_tcp_, frame_), cartesian);
-    };
+        return motion_->moveToPose(toolPose(tcp, tool_rotation_, tool_to_tcp_, frame_), cartesian);
+      };
     const auto grip = [&](double width) {
-      std::vector<double> joints;
-      for (const auto sign : signs_) {
-        joints.push_back(sign * width / 2.0);
-      }
-      return motion_->moveGripperToJoints(joints);
-    };
+        std::vector<double> joints;
+        for (const auto sign : signs_) {
+          joints.push_back(sign * width / 2.0);
+        }
+        return motion_->moveGripperToJoints(joints);
+      };
 
     try {
       stage(Action::Feedback::PREPARING, "Preparing object and tool targets");
       const auto goal = handle->get_goal();
-      const auto stamp = rclcpp::Time(goal->object_pose.header.stamp, node_->get_clock()->get_clock_type());
+      const auto stamp = rclcpp::Time(
+        goal->object_pose.header.stamp,
+        node_->get_clock()->get_clock_type());
       if (stamp.nanoseconds() != 0 && max_age_ > 0) {
         const double age = (node_->now() - stamp).seconds();
         if (age < -0.1 || age > max_age_) {
@@ -256,9 +318,11 @@ private:
       if (width >= open_width_) {
         throw std::runtime_error("Object is wider than configured gripper opening");
       }
-      const tf2::Vector3 pick = tf2::Vector3(object.pose.position.x,
+      const tf2::Vector3 pick = tf2::Vector3(
+        object.pose.position.x,
         object.pose.position.y, object.pose.position.z) + offset_;
-      const tf2::Vector3 put = tf2::Vector3(place.pose.position.x,
+      const tf2::Vector3 put = tf2::Vector3(
+        place.pose.position.x,
         place.pose.position.y, place.pose.position.z + clearance_) + offset_;
       // 固定工具朝向下，搬运不会改变物块姿态。
       tf2::Quaternion object_q, place_q;
@@ -272,30 +336,51 @@ private:
       const tf2::Vector3 lifted(pick.x(), pick.y(), safe_z);
       const tf2::Vector3 pre_place(put.x(), put.y(), safe_z);
 
+      syncScene();
+      scene_->prepare(goal->object_id, object, goal->object_dimensions);
+
       stage(Action::Feedback::PICKING, "Opening, approaching and gripping " + goal->object_id);
-      step("Open gripper", [&]() { return grip(open_width_); });
-      step("Move to pre-grasp", [&]() { return move(pre_pick, false); });
-      step("Descend to grasp", [&]() { return move(pick, true); });
-      step("Close gripper", [&]() { return grip(std::max(0.0, width - compression_)); });
+      step("Open gripper", [&]() {return grip(open_width_);});
+      step("Move to pre-grasp", [&]() {return move(pre_pick, false);});
+      step("Descend to grasp", [&]() {return move(pick, true);});
+      step(
+        "Close gripper", [&]() {
+          // 进入夹持阶段即保留负载模型，取消/失败后由显式释放服务恢复。
+          scene_->attach();
+          holding_ = true;
+          return grip(std::max(0.0, width - compression_));
+        });
 
       stage(Action::Feedback::TRANSFERRING, "Lifting and transferring");
-      step("Lift object", [&]() { return move(lifted, true); });
-      step("Transfer object", [&]() { return move(pre_place, false); });
+      step("Lift object", [&]() {return move(lifted, true);});
+      step("Transfer object", [&]() {return move(pre_place, false);});
 
       stage(Action::Feedback::PLACING, "Lowering, releasing and retreating");
-      step("Descend to place", [&]() { return move(put, true); });
-      step("Release object", [&]() { return grip(open_width_); });
-      step("Retreat", [&]() { return move(put + tf2::Vector3(0, 0, retreat_), true); });
+      step("Descend to place", [&]() {return move(put, true);});
+      step(
+        "Release object", [&]() {
+          if (!grip(open_width_)) {return false;}
+          scene_->release();
+          holding_ = false;
+          return true;
+        });
+      step("Retreat", [&]() {return move(put + tf2::Vector3(0, 0, retreat_), true);});
       result->success = true;
       result->message = "Motion sequence completed; object placement needs visual verification";
     } catch (const std::exception & error) {
       result->message = error.what();
       RCLCPP_WARN(node_->get_logger(), "%s", error.what());
     }
+    try {
+      scene_->restoreTouch();
+    } catch (const std::exception & error) {
+      result->success = false;
+      result->message += "; restoring collision checks failed: " + std::string(error.what());
+    }
     if (rclcpp::ok()) {
       if (handle->is_canceling()) {
         result->success = false;
-        result->message = "Canceled after current motion; gripper state retained";
+        result->message = "Trajectory canceled; gripper and any attached object retained";
         handle->canceled(result);
       } else if (result->success) {
         handle->succeed(result);
@@ -310,10 +395,17 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   std::unique_ptr<Motion> motion_;
+  std::unique_ptr<Scene> scene_;
+  std::mutex observations_mutex_;
+  my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr observations_;
+  rclcpp::Subscription<my_robot_interface::msg::DetectedObjectArray>::SharedPtr objects_sub_;
+  rclcpp::CallbackGroup::SharedPtr recovery_group_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_service_;
   rclcpp_action::Server<Action>::SharedPtr server_;
   rclcpp_action::Server<NamedAction>::SharedPtr named_server_;
   std::thread worker_;
   std::atomic<bool> busy_{false};
+  std::atomic<bool> holding_{false};
   std::string frame_;
   tf2::Vector3 tool_to_tcp_, offset_;
   tf2::Quaternion tool_rotation_;
@@ -325,11 +417,12 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<rclcpp::Node>("pick_place_executor",
+  auto node = std::make_shared<rclcpp::Node>(
+    "pick_place_executor",
     rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true));
   rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
   executor.add_node(node);
-  std::thread spin_thread([&]() { executor.spin(); });
+  std::thread spin_thread([&]() {executor.spin();});
   int result = 0;
   try {
     PickPlaceExecutor server(node);

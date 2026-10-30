@@ -49,6 +49,10 @@ public:
   bool openGripper();
   bool closeGripper();
 
+  // 可从另一线程请求取消当前轨迹；新任务开始前调用 clearStop()。
+  void stop();
+  void clearStop();
+
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

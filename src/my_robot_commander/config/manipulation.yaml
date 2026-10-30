@@ -6,6 +6,15 @@ pick_place_executor:
     arm_group: arm
     gripper_group: gripper
     end_effector_link: link6
+    objects_topic: /perception/objects
+    touch_links: [link7, link8]   # 只允许目标物块与手指接触
+
+    # MoveIt 的静态碰撞盒；坐标使用 reference_frame，尺寸/位置单位 m，rpy 单位 rad。
+    # 桌面场景可添加 table，并配置 scene.table.size / position / rpy。
+    scene_boxes: [ground]
+    scene.ground.size: [2.0, 2.0, 0.02]
+    scene.ground.position: [0.0, 0.0, -0.01]
+    scene.ground.rpy: [0.0, 0.0, 0.0]
 
     velocity_scaling: 0.2
     acceleration_scaling: 0.2

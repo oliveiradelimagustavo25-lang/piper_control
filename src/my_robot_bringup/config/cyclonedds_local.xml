@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain Id="any">
+    <General>
+      <AllowMulticast>false</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <!-- Cyclone 0.10.5 默认只扫描 0～9；GUI 仿真需要更多参与者。 -->
+      <MaxAutoParticipantIndex>99</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer Address="127.0.0.1"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

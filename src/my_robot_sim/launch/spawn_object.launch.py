@@ -12,6 +12,7 @@ def generate_launch_description():
     model = LaunchConfiguration('model')
 
     arguments = [
+        DeclareLaunchArgument('ros_domain_id', default_value='95'),
         DeclareLaunchArgument('localhost_only', default_value='1'),
         DeclareLaunchArgument(
             'model', default_value='blue_cube',
@@ -53,6 +54,7 @@ def generate_launch_description():
         ],
     )
     return LaunchDescription(arguments + [
+        SetEnvironmentVariable('ROS_DOMAIN_ID', LaunchConfiguration('ros_domain_id')),
         SetEnvironmentVariable('ROS_LOCALHOST_ONLY', LaunchConfiguration('localhost_only')),
         model_environment, spawn,
     ])

@@ -32,6 +32,7 @@ def generate_launch_description():
     moveit_params = [moveit_config.to_dict(), robot_params]
 
     args = [
+        DeclareLaunchArgument('ros_domain_id', default_value='95'),
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true'),
         DeclareLaunchArgument('world', default_value=os.path.join(robot_path, 'world', 'room.world')),
@@ -47,6 +48,7 @@ def generate_launch_description():
         DeclareLaunchArgument('localhost_only', default_value='1'),
     ]
     environment = [
+        SetEnvironmentVariable('ROS_DOMAIN_ID', LaunchConfiguration('ros_domain_id')),
         SetEnvironmentVariable('ROS_LOCALHOST_ONLY', LaunchConfiguration('localhost_only')),
         SetEnvironmentVariable('GAZEBO_MODEL_PATH', os.pathsep.join(filter(None, [
             '/usr/share/gazebo-11/models',

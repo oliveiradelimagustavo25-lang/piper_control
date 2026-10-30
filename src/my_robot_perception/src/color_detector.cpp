@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -62,6 +63,12 @@ public:
       std::bind(&ColorDetector::image_callback, this, std::placeholders::_1));
     if (show_window_) {
       cv::namedWindow("Color detector", cv::WINDOW_NORMAL);
+      cv::Mat waiting = cv::Mat::zeros(240, 640, CV_8UC3);
+      cv::putText(waiting, "Waiting for camera image...", {20, 120},
+        cv::FONT_HERSHEY_SIMPLEX, 0.7, {255, 255, 255}, 1);
+      cv::imshow("Color detector", waiting);
+      // 没有图像回调时也处理窗口事件，保证等待画面能显示、拖动和重绘。
+      window_timer_ = create_wall_timer(std::chrono::milliseconds(33), []() { cv::waitKey(1); });
     }
     RCLCPP_INFO(get_logger(), "Listening on %s; labels: 0=background, 1=red, 2=green, 3=blue",
       image_topic.c_str());
@@ -165,7 +172,6 @@ private:
       }
       if (show_window_) {
         cv::imshow("Color detector", debug); //这个是给自己看的彩色图，标记了检测到的颜色区域
-        cv::waitKey(1);
       }
     } catch (const cv_bridge::Exception & error) {
       RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 5000, "Image conversion: %s", error.what());
@@ -179,6 +185,7 @@ private:
   int min_area_, max_area_;
   bool show_window_, publish_debug_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::TimerBase::SharedPtr window_timer_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr labels_pub_, debug_pub_;
 };
 

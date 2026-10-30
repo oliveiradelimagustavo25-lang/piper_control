@@ -2,6 +2,10 @@
 
 <launch>
 
+    <!-- 此独立模型预览与其他工作区隔离；需要联调时可传入相同的域编号。 -->
+    <arg name="ros_domain_id" default="96" description="模型预览使用的 ROS 域编号"/>
+    <set_env name="ROS_DOMAIN_ID" value="$(var ros_domain_id)"/>
+
     <arg 
         name="robot_model" 
         default="$(find-pkg-share demo_robot_pkg)/urdf/piper_description.urdf" 
@@ -19,12 +23,12 @@
         pkg="joint_state_publisher_gui" 
         exec="joint_state_publisher_gui"/>
 
-<!--
+
     <node 
         pkg="rviz2"
         exec="rviz2"
         output="screen"
-        args="-d $(find-pkg-share demo_robot_pkg)/rviz/rviz_config.rviz"/>
--->
+        args="-d $(find-pkg-share demo_robot_pkg)/rviz/robot_preview.rviz"/>
+
 
 </launch>

@@ -3,7 +3,7 @@ color_detector:
     image_topic: /camera_sensor/image_raw
     labels_topic: /perception/color_labels
     debug_topic: /perception/color_debug
-    show_window: false
+    show_window: true
     publish_debug: true
 
     # 面积单位为像素；1 cm 小物块先使用较低阈值。
