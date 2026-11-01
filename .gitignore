@@ -2,7 +2,8 @@ build/
 install/
 log/
 .vscode/
-test/
+test/local/
 __pycache__/
 *.py[cod]
 *$py.class
+docs/

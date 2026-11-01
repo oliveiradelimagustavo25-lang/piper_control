@@ -4,6 +4,23 @@
 
 流程：RGB-D 相机 → 颜色检测与深度定位 → 任务规划 → 抓放执行器 → MoveIt → ros2_control。
 
+## 项目结构与架构
+
+| 目录 | 职责 |
+| --- | --- |
+| `src/demo_robot_pkg` | Piper 模型、腕部相机、Gazebo 世界与仿真控制器 |
+| `src/my_robot_bringup`、`src/my_robot_sim`、`src/my_robot_model` | 整合启动、物块生成与模型资源 |
+| `src/my_robot_perception` | 颜色标签、深度定位及 ArUco 检测 |
+| `src/my_robot_interface` | 共用消息和 Action |
+| `src/my_robot_planner` | 观察位、批次目标选择和分拣策略 |
+| `src/my_robot_commander` | 可复用运动/碰撞场景库与抓放执行器 |
+| `src/my_robot_moveit_pkg` | MoveIt 规划、运动学与控制器配置 |
+| [`script/`](script/README.md) | 简短的 Shell 运行入口及运行说明 |
+| [`test/`](test/README.md) | Python 分阶段测试、共用工具及 C++ 运动探针 |
+| `docs/` | 本地沟通与开发详细报告，不代替目录使用说明 |
+
+感知通过 `/perception/objects` 提供物体中心；任务节点以 Action 调用抓放执行器。执行器复用运动与场景库，经 MoveIt 和 ros2_control 驱动仿真。场景、采样和验收代码位于 `test/`，业务节点位于 `src/`。
+
 ## 安装与构建
 
 先配置 [ROS 2 Humble 软件源](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html)，再安装依赖：
@@ -33,15 +50,15 @@ source install/setup.bash
 构建后，从工作区根目录运行，脚本会启动仿真、生成物块并发送任务：
 
 ```bash
-./test/run_sorting.sh gui color_order 3,1,2  # 蓝 → 红 → 绿
-./test/run_sorting.sh headless nearest     # 每次选择离 TCP 最近的目标
+./script/run_sorting.sh gui color_order 3,1,2  # 蓝 → 红 → 绿
+./script/run_sorting.sh headless nearest     # 每次选择离 TCP 最近的目标
 ```
 
 默认 `gui / color_order / 1,2,3`，颜色编号为红=1、绿=2、蓝=3。GUI 模式任务结束后保留窗口，按 Ctrl+C 退出。
 脚本使用 ROS 域 **95**、Gazebo 端口 **11495**；不要同时运行使用相同域和端口的测试。无显示器时需安装 `xvfb`。
 日志、视觉截图和物理验收结果位于 `log/sorting/<时间>/`。
 
-在其他终端查询时，加载脚本打印的 `ros_env.sh`，再执行 `ros2 node list --no-daemon`。
+在其他终端查询时，加载脚本打印的 `ros_env.bash`，再执行 `ros2 node list --no-daemon`。运行流程、临时场景与退出规则见 [`script/README.md`](script/README.md)。
 
 ## 手动启动
 
@@ -113,13 +130,14 @@ target_link_libraries(your_node
 ```bash
 python3 test/planner_check.py                         # 任务与感知接口，域 94
 python3 test/executor_check.py --mode headless        # 运动、碰撞、取消与物理抓放，域 93
+python3 test/executor_check.py --stage physical       # 独立验证物理抓放
 ```
 
-执行器测试使用 Gazebo 端口 11493，输出位于 `log/executor_validation/`；无显示器时可用 `xvfb-run -a` 包装命令。物理验收要求抬升超过 **4 cm**、最终放置误差小于 **2 cm**。
+执行器测试使用 Gazebo 端口 11493，输出位于 `log/executor_validation/`；无显示器时自动使用 `xvfb-run`，需已安装 `xvfb`。物理验收要求抬升超过 **4 cm**、最终放置误差小于 **2 cm**。完整阶段列表、前提与复用方法见 [`test/README.md`](test/README.md)。
 
-最近一次三色闭环通过，放置误差约 **0.46～0.51 mm**；任务/感知接口 **16 项通过**。这些结果只代表固定仿真场景，不代表实机精度。
+最近一次三色闭环通过，放置误差约 **0.48～0.53 mm**；任务/感知接口 **16 项通过**。这些结果只代表固定仿真场景，不代表实机精度。
 
 - 视觉当前每种颜色保留一个物块，要求已知尺寸、平放、顶部可见；RGB 与深度需对齐。
 - Action 成功表示运动流程完成，尚未加入抓后视觉复核或未知障碍物自动建图。
 - 软件取消不能替代硬件急停；实机需重新标定 TCP、相机外参和夹持参数。
-- `test/` 和 `log/` 当前被忽略，其他机器上的仓库副本可能没有本地脚本或报告。
+- 正式 `test/` 与 `script/` 不再被整体忽略，待审查后可纳入 Git；`test/local/`、`log/` 和构建产物继续忽略，本地 `docs/` 保留现有忽略设置。
