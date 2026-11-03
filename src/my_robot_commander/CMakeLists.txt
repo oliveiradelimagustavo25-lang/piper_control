@@ -11,7 +11,6 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_msgs REQUIRED)
-find_package(example_interfaces REQUIRED)
 find_package(my_robot_interface REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -26,17 +25,11 @@ target_include_directories(motion_controller PUBLIC
 ament_target_dependencies(motion_controller
   rclcpp geometry_msgs moveit_msgs moveit_ros_planning_interface tf2)
 
-add_executable(commander src/commander.cpp)
-target_link_libraries(commander motion_controller)
-
-
-ament_target_dependencies(commander rclcpp example_interfaces my_robot_interface)
-
 add_executable(pick_place_executor src/pick_place_executor.cpp)
 target_link_libraries(pick_place_executor motion_controller)
 ament_target_dependencies(pick_place_executor
   rclcpp rclcpp_action my_robot_interface geometry_msgs tf2 tf2_ros tf2_geometry_msgs)
-install(TARGETS commander pick_place_executor DESTINATION lib/${PROJECT_NAME})
+install(TARGETS pick_place_executor DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 install(DIRECTORY include/ DESTINATION include)

@@ -1,0 +1,11 @@
+# Parameters retained from the previous wrist-camera configuration.
+name: wrist_camera
+frame: camera_optical_link
+width: 800
+height: 600
+horizontal_fov_rad: 1.5009831567
+near: 0.02
+far: 3.0
+min_depth: 0.05
+max_depth: 3.0
+update_rate: 10

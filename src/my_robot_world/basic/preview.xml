@@ -1,0 +1,20 @@
+<mujoco model="piper_scene_preview">
+  <!-- Robot include is resolved by the scene loader from my_robot_description. -->
+  <include file="robot_description.xml"/>
+  <visual>
+    <global offwidth="800" offheight="600"/>
+  </visual>
+  <asset>
+    <texture name="ground_grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.25 0.30 0.35" rgb2="0.55 0.60 0.65"/>
+    <material name="ground_material" texture="ground_grid" texrepeat="4 4" texuniform="true"/>
+    <texture name="aruco_texture" type="2d" file="../assets/marker_0.png"/>
+    <material name="aruco_marker" texture="aruco_texture"/>
+  </asset>
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1"/>
+    <geom name="ground" type="plane" size="2 2 0.1" material="ground_material"/>
+    <include file="../objects/cubes.xml"/>
+    <include file="../objects/aruco_board.xml"/>
+  </worldbody>
+</mujoco>

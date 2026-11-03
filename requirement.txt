@@ -1,8 +1,11 @@
 # Python-layer compatibility ranges for Ubuntu 22.04 / system Python 3.10.
 # These are ROS tooling / cv_bridge-related dependencies, not a full environment lock.
 # Prefer apt packages python3-numpy and python3-yaml; see README.md.
-# pip cannot install ROS 2, MoveIt, Gazebo, cv_bridge or C++ OpenCV for this project.
+# pip cannot install ROS 2, MoveIt, cv_bridge or C++ OpenCV for this project.
 # Do not add pip opencv-python/opencv-contrib-python to replace system OpenCV.
 # NumPy 1.x is retained for compatibility with the current Ubuntu cv_bridge stack.
 numpy>=1.21.5,<2.0
 PyYAML>=5.4.1,<7.0
+
+# Scene loader uses MjSpec; this is the locally validated Python version.
+mujoco==3.12.0

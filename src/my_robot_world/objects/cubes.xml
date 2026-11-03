@@ -1,0 +1,15 @@
+<mujocoinclude>
+  <!-- MuJoCo box size is half the side length; each cube is 1 cm and 1 g. -->
+  <body name="red_cube" pos="0.32 -0.08 0.03">
+    <freejoint/>
+    <geom type="box" size="0.005 0.005 0.005" mass="0.001" rgba="1 0 0 1"/>
+  </body>
+  <body name="green_cube" pos="0.32 0 0.03">
+    <freejoint/>
+    <geom type="box" size="0.005 0.005 0.005" mass="0.001" rgba="0 1 0 1"/>
+  </body>
+  <body name="blue_cube" pos="0.32 0.08 0.03">
+    <freejoint/>
+    <geom type="box" size="0.005 0.005 0.005" mass="0.001" rgba="0 0 1 1"/>
+  </body>
+</mujocoinclude>

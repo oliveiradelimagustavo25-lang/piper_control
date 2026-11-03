@@ -1,0 +1,6 @@
+<mujocoinclude>
+  <!-- The existing board is 0.2 m square and 0.01 m thick. -->
+  <body name="aruco_board" pos="0.5 0 0.1" euler="0 0 1.57079632679">
+    <geom name="aruco_board" type="box" size="0.1 0.005 0.1" material="aruco_marker"/>
+  </body>
+</mujocoinclude>
