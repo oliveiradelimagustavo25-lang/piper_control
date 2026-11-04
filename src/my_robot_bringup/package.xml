@@ -8,6 +8,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>my_robot_description</exec_depend>
   <exec_depend>my_robot_world</exec_depend>
+  <exec_depend>my_robot_perception</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
@@ -18,6 +19,7 @@
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>
   <exec_depend>mujoco_ros2_control</exec_depend>
+  <exec_depend>mujoco_ros2_control_plugins</exec_depend>
   <exec_depend>my_robot_moveit_pkg</exec_depend>
   <exec_depend>my_robot_commander</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>

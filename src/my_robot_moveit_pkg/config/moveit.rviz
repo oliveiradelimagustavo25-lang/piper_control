@@ -13,6 +13,22 @@ Visualization Manager:
     - Class: rviz_default_plugins/Grid
       Name: Grid
       Value: true
+    # MotionPlanning already renders the robot; enable this display when inspecting URDF alone.
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Durability Policy: Transient Local
+      Enabled: false
+      Visual Enabled: true
+    # Available for frame debugging without covering the scene by default.
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
     - Class: moveit_rviz_plugin/MotionPlanning
       Name: MotionPlanning
       Planned Path:
@@ -20,14 +36,16 @@ Visualization Manager:
         State Display Time: 0.05 s
         Trajectory Topic: display_planned_path
       Planning Scene Topic: monitored_planning_scene
+      Planning Request:
+        Planning Group: arm
       Robot Description: robot_description
       Scene Geometry:
         Scene Alpha: 1
       Scene Robot:
-        Robot Alpha: 0.5
+        Robot Alpha: 1
       Value: true
   Global Options:
-    Fixed Frame: dummy_link
+    Fixed Frame: world
   Tools:
     - Class: rviz_default_plugins/Interact
     - Class: rviz_default_plugins/MoveCamera
@@ -43,7 +61,7 @@ Visualization Manager:
         Z: 0.30
       Name: Current View
       Pitch: 0.5
-      Target Frame: dummy_link
+      Target Frame: world
       Yaw: -0.623
 Window Geometry:
   Height: 975

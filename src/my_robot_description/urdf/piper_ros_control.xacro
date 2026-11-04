@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- All controlled joints expose position commands and position/velocity feedback. -->
+  <xacro:macro name="piper_controlled_joint" params="joint_name">
+    <joint name="${joint_name}">
+      <command_interface name="position"/>
+      <state_interface name="position"><param name="initial_value">0.0</param></state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:macro name="piper_ros_control" params="headless sim_speed_factor model_path">
+    <ros2_control name="MujocoSystem" type="system">
+      <hardware>
+        <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+        <param name="mujoco_model">${model_path}</param>
+        <param name="headless">${str(headless).lower()}</param>
+        <param name="sim_speed_factor">${sim_speed_factor}</param>
+      </hardware>
+      <xacro:piper_controlled_joint joint_name="joint1"/>
+      <xacro:piper_controlled_joint joint_name="joint2"/>
+      <xacro:piper_controlled_joint joint_name="joint3"/>
+      <xacro:piper_controlled_joint joint_name="joint4"/>
+      <xacro:piper_controlled_joint joint_name="joint5"/>
+      <xacro:piper_controlled_joint joint_name="joint6"/>
+      <xacro:piper_controlled_joint joint_name="joint7"/>
+      <xacro:piper_controlled_joint joint_name="joint8"/>
+    </ros2_control>
+  </xacro:macro>
+</robot>

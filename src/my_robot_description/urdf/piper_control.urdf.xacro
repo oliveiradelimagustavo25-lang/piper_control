@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="piper">
+  <xacro:arg name="headless" default="false"/>
+  <xacro:arg name="sim_speed_factor" default="1.0"/>
+  <xacro:arg name="model_path" default="$(find my_robot_description)/mjcf/control.xml"/>
+
+  <!-- Compose the shared robot description with the MuJoCo control interface. -->
+  <xacro:include filename="$(find my_robot_description)/urdf/piper_description.urdf"/>
+  <xacro:include filename="$(find my_robot_description)/urdf/piper_ros_control.xacro"/>
+
+  <xacro:piper_ros_control headless="$(arg headless)"
+                           sim_speed_factor="$(arg sim_speed_factor)"
+                           model_path="$(arg model_path)"/>
+</robot>

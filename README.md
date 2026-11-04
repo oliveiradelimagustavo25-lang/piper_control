@@ -1,12 +1,17 @@
 # Piper MuJoCo 工作区
 
-本分支面向 Piper 机械臂的 MuJoCo 仿真。正式入口已组合机器人、地面、物块、标记板和相机，并提供 ros2_control、MoveIt 与执行接口；相机数据发布、规划场景物体同步、任务规划和完整分拣尚未接入。
+本分支面向 Piper 机械臂的 MuJoCo 仿真。正式入口已组合机器人、地面、物块、标记板和相机，并提供 ros2_control、MoveIt、执行接口和颜色与深度感知；规划场景物体同步、任务规划和完整分拣尚未接入。
 
 ## 当前结构
 
 ```text
 src/
-  my_robot_description/       # URDF、机器人 MJCF、网格和 RViz 配置
+  my_robot_description/       # 机器人描述、控制接口与控制器配置
+    urdf/piper_description.urdf
+    urdf/piper_ros_control.xacro
+    urdf/piper_control.urdf.xacro
+    config/ros2_controllers.yaml
+    mjcf/                     # 机器人本体与 MuJoCo 执行器
   my_robot_world/            # MuJoCo 世界、物块、标记板和相机参数
     objects/
     basic/preview.xml         # 基础世界组合入口
@@ -17,11 +22,19 @@ src/
   my_robot_bringup/           # 仿真、控制与执行启动入口
     launch/mujoco.launch.py
     launch/ros2_control.launch.py # 可复用的仿真控制启动层
+    launch/perception.launch.py   # 颜色检测与深度定位
   my_robot_interface/
   my_robot_perception/
   my_robot_planner/
   my_robot_commander/
   my_robot_moveit_pkg/
+    config/moveit.rviz        # MoveIt RViz 唯一配置
+    launch/moveit_rviz.launch.py
+
+script/
+  pick_three_colors.sh        # 完整仿真、pose_1 观察和三色抓放
+  clear.sh                    # 清理本工作区已脱离启动进程的 ROS 残留
+  README.md
 
 test/
   robot_description.py        # 机器人本体查看，可选 RViz
@@ -41,7 +54,7 @@ docs/                         # 讨论与开发报告
 | `test/robot_description.py` | 静态机器人本体，可选 RViz |
 | `test/mujoco_world.py` | 世界与传感器预览，由 Python 推进物理 |
 | `test/robot_control.py` | 机器人本体窗口与 ros2_control 接口，供交互测试 |
-| `my_robot_bringup/mujoco.launch.py` | 完整世界、ros2_control、MoveIt 与执行接口 |
+| `my_robot_bringup/mujoco.launch.py` | 完整世界、ros2_control、MoveIt、执行接口与感知 |
 
 ## 运行与检查
 
@@ -75,7 +88,7 @@ python3 test/robot_description.py --rviz
 机器人控制链使用相同的环境：
 
 ```bash
-# 完整世界、ros2_control、MoveIt 和抓放执行接口
+# 完整世界、ros2_control、MoveIt、执行接口和感知
 ros2 launch my_robot_bringup mujoco.launch.py
 
 # 只打开机器人本体窗口，保持 ros2_control 接口在线
@@ -85,18 +98,35 @@ python3 test/robot_control.py
 python3 test/probes/check_robot_control.py
 ```
 
-`mujoco.launch.py headless:=true` 可无窗口运行；`with_moveit:=false` 保留完整世界与控制器；`with_executor:=false` 只关闭抓放执行端；`sim_speed_factor:=0.5` 设置半速仿真。场景、控制器、执行配置和常用运动参数均提供 arguments，使用 `--show-args` 查看，定义见 [bringup/README.md](src/my_robot_bringup/README.md)。交互测试继承终端 ROS 域，自动探针默认使用域 184。每个阶段独立运行，避免同域控制仿真冲突。正式入口不启动检测器和任务策略。
+`mujoco.launch.py headless:=true` 可无窗口运行；`with_moveit:=false` 保留完整世界与控制器；`with_executor:=false` 只关闭抓放执行端；`sim_speed_factor:=0.5` 设置半速仿真。场景、控制器、执行配置和常用运动参数均提供 arguments，使用 `--show-args` 查看，定义见 [bringup/README.md](src/my_robot_bringup/README.md)。交互测试继承终端 ROS 域，自动探针默认使用域 184。每个阶段独立运行，避免同域控制仿真冲突。正式入口默认启动颜色与深度感知，不启动 ArUco 检测和任务策略。
 
-RViz 使用 URDF 和关节滑块；当前滑块不驱动 MuJoCo。两个可视化窗口需要图形环境。其他选项、相机渲染和安装路径说明见 [test/README.md](test/README.md)。
+若 MuJoCo 或颜色调试窗口没有出现，先检查启动日志和同域 `/robot_description` 是否冲突；窗口参数及隔离 ROS 域的方法见 [bringup 故障排查](src/my_robot_bringup/README.md#窗口不显示时)。
+
+`robot_description.py --rviz` 打开的是静态预览及关节滑块，滑块不驱动 MuJoCo。要在正式仿真中使用 MoveIt 规划界面，保持 `mujoco.launch.py` 运行，并在相同 ROS 域的另一终端执行：
+
+```bash
+source install/setup.bash
+ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
+```
+
+该 RViz 使用 `world` 固定坐标系，与 MoveIt 连接；其规划场景尚未自动同步 MuJoCo 物块。其他测试选项、相机渲染和安装路径说明见 [test/README.md](test/README.md)。
+
+## 三色抓放仿真
+
+构建工作区后，运行 `./script/pick_three_colors.sh`，脚本会启动完整仿真，检查控制与相机接口，然后触发 `pose_1` 观察和三色抓放任务。默认继承当前 ROS 域，未设置时使用 227；详细选项和限制见 [script/README.md](script/README.md)。
+
+## 清理残留进程
+
+启动入口退出后，如果节点仍留在后台，可以先执行 `./script/clear.sh --dry-run` 查看，再用 `./script/clear.sh` 清理。脚本仅处理本工作区中已被 init 或用户 systemd 接管的已知进程；识别范围、手动终止方法和 ROS 发现信息说明见 [script/README.md](script/README.md)。
 
 ## 分工与下一步
 
-`my_robot_description` 保存机械臂和相机外形、安装坐标；`my_robot_world` 使用它组合世界，并在相机光学坐标系上添加 MuJoCo 相机。场景文件通过包内加载器解析机器人引用，避免复制机器人模型。当前相机只支持 MuJoCo 渲染，尚未发布 ROS 图像、深度或 CameraInfo；画面遮挡和标记板可见性还需调整与校验。
+`my_robot_description` 保存机械臂和相机外形、安装坐标、ros2_control 描述和控制器配置；`my_robot_bringup` 负责选择配置并启动系统。`my_robot_world` 使用机器人描述组合世界，并在相机光学坐标系上添加 MuJoCo 相机。场景文件通过包内加载器解析机器人引用，避免复制机器人模型。正式入口复用 MuJoCo 原生相机插件发布 RGB、对齐深度和 CameraInfo，默认话题与感知配置一致；画面遮挡、识别效果和相机视角仍需实际校验。
 
 相机与支架网格已修正额外 90° 上轴旋转，两个测试查看器恢复侧栏，世界加入棋盘格地面。查看器退出时等待其线程清理完成；世界窗口支持空格暂停/继续、右方向键单步。修改与验证结果见[相机、查看器与启动参数修正报告](docs/2026-11-02_camera_viewer_launch_fix.md)。
 
 当前完整世界由原生控制插件统一推进，测试脚本不作为正式运行库。`motion_controller.cpp` 作为共享库由 `pick_place_executor` 使用，执行参数由 YAML 配置并允许 launch 覆盖。职责与接口修正见[完整世界启动报告](docs/2026-11-02_world_control_roles.md)。
 
-后续继续校准控制精度、同步 MuJoCo 物体到 MoveIt 规划场景，并接入相机发布、感知和任务规划。当前环境的部分 C++ 节点在退出时仍有析构异常，详见本轮报告。
+后续继续校准控制精度、同步 MuJoCo 物体到 MoveIt 规划场景，并完善感知识别和接入任务规划。当前环境的部分 C++ 节点在退出时仍有析构异常，详见本轮报告。
 
 正式测试和必要资源建议纳入 Git；临时测试放在 `test/local/`，构建产物和缓存已忽略。临时节点移除及当前执行入口见[开发报告](docs/2026-11-02_remove_temporary_commander.md)，MoveIt 和执行链整合见[整合报告](docs/2026-11-02_mujoco_moveit_execution.md)，此前控制链构建见[控制报告](docs/2026-11-02_mujoco_control.md)，此前世界构建过程见[构建报告](docs/2026-11-02_mujoco_world_construction.md)。

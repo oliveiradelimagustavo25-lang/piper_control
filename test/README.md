@@ -10,6 +10,8 @@ python3 test/robot_description.py --rviz     # 同时打开 RViz 和关节滑块
 
 默认直接加载 `my_robot_description/mjcf/piper.xml`，无需 URDF；`--rviz` 才使用 URDF 和 ROS。RViz 的滑块只改变 RViz 中的关节姿态，当前不驱动 MuJoCo。关闭 MuJoCo 查看器或按 Ctrl+C 会清理本次启动的 RViz 节点。
 
+此处是静态预览。MoveIt 规划 RViz 使用独立配置；先启动正式 `mujoco.launch.py`，再在同一 ROS 域运行 `ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true`。
+
 ## 完整世界
 
 ```bash
@@ -58,7 +60,7 @@ ros2 action send_goal /gripper_controller/follow_joint_trajectory control_msgs/a
   '{trajectory: {joint_names: [joint7, joint8], points: [{positions: [0.01, -0.01], time_from_start: {sec: 3}}]}}'
 ```
 
-`--sim-speed-factor` 调整目标仿真倍率，`--controllers-file` 替换控制器配置。机器人本体不包含世界地面和物块；完整世界与 MoveIt、抓放执行接口使用正式 `mujoco.launch.py`。
+`--sim-speed-factor` 调整目标仿真倍率，`--controllers-file` 替换控制器配置；默认配置位于 `my_robot_description/config/ros2_controllers.yaml`。机器人本体不包含世界地面和物块；完整世界与 MoveIt、抓放执行接口使用正式 `mujoco.launch.py`。
 
 ## 自动控制探针
 
