@@ -7,27 +7,59 @@
 ```bash
 source /opt/ros/humble/setup.bash
 colcon build
-./script/pick_three_colors.sh
+./script/pick_three_colors.sh --ros-domain-id 227
 ```
 
-脚本自动加载 ROS Humble 和本工作区，使用当前 `ROS_DOMAIN_ID`；未设置时使用域 227。它启动 `mujoco.launch.py`，等待三个控制器、执行 Action 和相机图像就绪，接着启动任务规划器并发送三色任务。规划器先移动到 `pose_1`，然后按红、绿、蓝执行抓放；每次抓取前会返回观察位。任务结束后仿真保持打开，按 Ctrl+C 退出。Action 失败会显示错误，动作完成也需要检查物块实际放置位置。
+脚本读取工作区的 `config/mujoco_launch.yaml`，加载环境、检查 ROS 域并启动 `mujoco.launch.py`；总入口启动仿真、MoveIt、任务规划器和感知节点。脚本等待机械臂控制器与命名姿态 Action 就绪，发送 `pose_1` 目标；到位后自动发送一次分拣任务，使用 `task_planner.yaml` 中的默认策略和颜色顺序。任务完成后仿真继续运行；如果动作或分拣失败，脚本会显示结果并退出。
+
+直接使用 `ros2 launch my_robot_bringup mujoco.launch.py` 不会自动开始分拣。需要手动触发时，在同一 ROS 域的另一终端发送目标：
 
 ```bash
-# 指定 ROS 域，并将参数传给 mujoco.launch.py
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=227
+ros2 action send_goal --feedback /sorting/sort_objects my_robot_interface/action/SortObjects \
+  '{strategy: color_order, color_order: [1, 2, 3]}'
+```
+
+规划器收到分拣目标后会按自身配置再次到观察位 `pose_1`，等待新图像，再按默认红、绿、蓝顺序执行抓放。Action 完成表示运动序列完成，物块最终位置仍需视觉核验。脚本会读取任务规划器实际配置的 Action 名称；手动调用时，如用 `sort_action` 覆盖了名称，也应使用新名称。已有分拣任务在执行时，不要同时发送重复目标。
+
+```bash
+# 将 -- 后的参数传给 mujoco.launch.py
 ./script/pick_three_colors.sh --ros-domain-id 227 -- sim_speed_factor:=0.5
 
-# 隐藏 MuJoCo 与颜色调试窗口（相机仍需要 OpenGL 环境）
+# 隐藏 MuJoCo 和颜色调试窗口（相机仍需要 OpenGL 环境）
 ./script/pick_three_colors.sh --headless --no-debug-window
 
-# 按距离选择目标，或替换规划器的配置
-./script/pick_three_colors.sh --strategy nearest --planner-config /path/to/task_planner.yaml
+./script/pick_three_colors.sh --planner-config /path/to/task_planner.yaml
 
+# 选择另一份总配置；相对路径以该配置文件所在目录为基准
+./script/pick_three_colors.sh --config /path/to/mujoco_launch.yaml
 ./script/pick_three_colors.sh --help
 ```
 
-`--` 后的 `name:=value` 原样传给 `mujoco.launch.py`。脚本从实际运行节点读取抓放、命名姿态 Action 及物体、图像话题名称，传给任务规划器；高级参数仍在各自 YAML 中配置，若修改 TCP、坐标系或物体尺寸，应保持规划与执行配置一致。脚本会覆盖规划器的观察姿态为 `pose_1`，其目标消息始终请求红、绿、蓝三个颜色。
+默认总配置保存在 [config/mujoco_launch.yaml](../config/mujoco_launch.yaml)，修改后重新运行脚本即可，不需要重新 `colcon build`。该文件中只写需要覆盖的 launch 参数；布尔值使用 `true` / `false`，路径相对于 YAML 自身所在目录。未知参数名会报错。`--headless`、`--no-debug-window`、`--planner-config` 和 `--` 后的同名参数会覆盖总配置。例如将总配置中的 `headless` 设为 `true` 后，可通过 `-- headless:=false` 临时打开窗口。
 
-脚本启动前检查目标 ROS 域；如果发现已有节点，会停止并要求选择空闲域，避免连接到其他仿真或设备。DDS 发现检查不能保证排除稍后启动的节点，在其他终端调试时需要设置相同域号。`headless` 只隐藏 MuJoCo 窗口，并不关闭相机渲染；无图形环境需要可用的 OpenGL 渲染方案。此脚本不会启动 RViz、自动验证物块最终位置，或修复已有节点退出异常。
+默认总配置直接指向工作区的六份节点 YAML，修改它们并重启脚本也无需重新构建。MoveIt 自动读取的 `kinematics.yaml`、`joint_limits.yaml` 等未由总配置的路径参数覆盖，仍来自安装目录，修改源码后需要重新构建对应包（除非原先使用了适用的符号链接安装）。运行中的节点不会自动重新加载 YAML。
+
+脚本默认继承 `ROS_DOMAIN_ID`，未设置时使用 227。启动前如果发现同域已有节点会停止，以减少机器人描述或控制接口冲突；DDS 检查无法保证发现稍后启动的节点。`--headless` 只隐藏 MuJoCo 窗口，不关闭相机渲染。按 Ctrl+C 退出 launch。
+
+## 命名姿态 Action
+
+脚本自动移动到 `pose_1` 使用 `pick_place_executor` 提供的命名姿态接口：
+
+- 默认名称：`/manipulation/move_to_named`。
+- Action 类型：`my_robot_interface/action/MoveToNamed`。
+- Goal：`target`，例如 `pose_1`；Result 包含 `success` 和 `message`。
+
+在同一 ROS 域中，也可以手动发送：
+
+```bash
+ros2 action send_goal --feedback /manipulation/move_to_named \
+  my_robot_interface/action/MoveToNamed '{target: pose_1}'
+```
+
+脚本会读取运行中执行器的 `move_to_named_action` 参数，因此通过 `manipulation.yaml`、总配置或 launch 参数修改接口名称后，脚本会使用实际名称。`pose_1` 定义在 MoveIt 的 `piper.srdf` 中。抓放和命名姿态共用执行器，执行器忙时新的目标可能被拒绝。
 
 ## 清理退出后残留的 ROS 进程
 

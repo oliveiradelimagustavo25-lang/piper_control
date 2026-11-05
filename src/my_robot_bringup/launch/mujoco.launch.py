@@ -1,28 +1,22 @@
 """Launch the complete MuJoCo world, ros2_control, MoveIt and execution APIs."""
 
-import math
+from functools import lru_cache
 from pathlib import Path
-import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
-from launch.actions import OpaqueFunction, RegisterEventHandler, Shutdown
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitution import Substitution
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
-import xacro
+from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 import yaml
-
-from my_robot_world.scenes.scene import export_scene
 
 
 # Frequent execution options are arguments; geometry and grasp details stay in YAML.
 EXECUTION_ARGUMENTS = {
-    'action_name': (str, 'PickPlace action name'),
+    'action_name': (str, 'Legacy alias for pick_place_action'),
     'move_to_named_action': (str, 'MoveToNamed action name'),
     'arm_group': (str, 'MoveIt arm planning group'),
     'gripper_group': (str, 'MoveIt gripper planning group'),
@@ -50,121 +44,128 @@ PERCEPTION_ARGUMENTS = {
 }
 
 
-def motion_nodes(context, robot_parameters, with_executor):
-    """The executor exposes actions and uses the linked MotionController library."""
-    from moveit_configs_utils import MoveItConfigsBuilder
+# File paths in the external configuration are relative to that YAML file.
+CONFIG_PATHS = {
+    'scene_file', 'robot_model', 'camera_config', 'controllers_file',
+    'moveit_controllers_file', 'manipulation_config', 'planner_config', 'perception_config',
+}
+CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATHS | {
+    'headless', 'with_moveit', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
+    'sim_speed_factor', 'planning_pipeline', 'pick_place_action', 'sort_action', 'observation_target',
+}
 
-    pipeline = LaunchConfiguration('planning_pipeline').perform(context)
-    config = (MoveItConfigsBuilder('piper', package_name='my_robot_moveit_pkg')
-              .robot_description(file_path='config/piper.urdf.xacro')
-              .trajectory_execution(file_path=LaunchConfiguration('moveit_controllers_file').perform(context))
-              .planning_pipelines(default_planning_pipeline=pipeline, pipelines=[pipeline])
-              .to_moveit_configs())
-    parameters = config.to_dict()
-    parameters.update(robot_parameters)
-    nodes = [Node(package='moveit_ros_move_group', executable='move_group',
-                  parameters=[parameters], output='screen', on_exit=Shutdown())]
-    if with_executor:
-        overrides = {}
-        for name, (value_type, _) in EXECUTION_ARGUMENTS.items():
-            value = LaunchConfiguration(name).perform(context)
-            if value:
-                overrides[name] = value_type(value)
-        config_file = Path(LaunchConfiguration('manipulation_config').perform(context))
-        execution = yaml.safe_load(config_file.read_text())['pick_place_executor']['ros__parameters']
-        # Merge before serialization: Humble's named YAML section can otherwise
-        # take precedence over wildcard sections generated for argument overrides.
-        execution_parameters = {**parameters, **execution, **robot_parameters, **overrides}
-        nodes.append(Node(
-            package='my_robot_commander', executable='pick_place_executor',
-            parameters=[execution_parameters],
-            output='screen', on_exit=Shutdown(),
-        ))
-    return nodes
+
+@lru_cache(maxsize=8)
+def load_launch_config(path):
+    """Read a snapshot for this launch; a new run reloads the YAML file."""
+    data = yaml.safe_load(Path(path).read_text())
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError('launch_config must contain a mapping of launch argument names to values')
+    if not all(isinstance(name, str) for name in data):
+        raise ValueError('launch_config argument names must be strings')
+    unknown = set(data) - CONFIG_KEYS
+    if unknown:
+        raise ValueError(f'Unknown launch_config arguments: {sorted(unknown)}')
+    for name, value in data.items():
+        if value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ValueError(f'launch_config value for {name} must be a scalar')
+    return data
+
+
+class ConfigDefault(Substitution):
+    """Use external YAML when present, otherwise retain the normal launch default."""
+
+    def __init__(self, name, fallback):
+        super().__init__()
+        self.name = name
+        self.fallback = normalize_to_list_of_substitutions(fallback)
+
+    def describe(self):
+        fallback = ''.join(item.describe() for item in self.fallback)
+        return f'launch_config[{self.name}] or {fallback}'
+
+    def perform(self, context):
+        config_file = LaunchConfiguration('launch_config').perform(context)
+        if config_file:
+            path = Path(config_file).expanduser().resolve()
+            value = load_launch_config(str(path)).get(self.name)
+            if value is not None:
+                if isinstance(value, bool):
+                    return str(value).lower()
+                value = str(value)
+                if self.name in CONFIG_PATHS and value:
+                    return str((path.parent / value).resolve())
+                return value
+        return perform_substitutions(context, self.fallback)
+
+
+def config_argument(name, default_value, **options):
+    return DeclareLaunchArgument(name, default_value=ConfigDefault(name, default_value), **options)
+
+
+def include_layer(bringup, filename, arguments):
+    return IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(bringup / 'launch' / filename)),
+        launch_arguments=arguments.items(),
+    )
+
+
+def control_layer(bringup, argument):
+    names = ('headless', 'sim_speed_factor', 'controllers_file', 'with_moveit', 'with_camera',
+             'planning_pipeline', 'moveit_controllers_file', 'scene_file', 'camera_config',
+             'perception_config', 'image_topic', 'depth_topic', 'camera_info_topic')
+    arguments = {name: argument(name) for name in names}
+    arguments['model_path'] = argument('robot_model')
+    return include_layer(bringup, 'ros2_control.launch.py', arguments)
+
+
+def motion_layer(bringup, argument, objects_topic):
+    names = ('planning_pipeline', 'moveit_controllers_file', 'manipulation_config',
+             'planner_config', 'pick_place_action', 'sort_action', 'observation_target',
+             *EXECUTION_ARGUMENTS)
+    arguments = {name: argument(name) for name in names}
+    arguments.update(robot_description=LaunchConfiguration('_piper_control_description'), objects_topic=objects_topic)
+    return include_layer(bringup, 'motion_control.launch.py', arguments)
+
+
+def perception_layer(bringup, argument):
+    arguments = {name: argument(name) for name in PERCEPTION_ARGUMENTS}
+    arguments['use_sim_time'] = 'true'
+    return include_layer(bringup, 'perception.launch.py', arguments)
 
 
 def launch_setup(context):
-    """Compose the world once and give its model to the sole physics owner."""
+    """Validate and assemble the three launch layers."""
     def argument(name):
         return LaunchConfiguration(name).perform(context)
 
+    config_file = argument('launch_config')
+    if config_file:
+        load_launch_config(str(Path(config_file).expanduser().resolve()))
+
     with_moveit = IfCondition(LaunchConfiguration('with_moveit')).evaluate(context)
-    with_executor = IfCondition(LaunchConfiguration('with_executor')).evaluate(context)
-    if with_executor and not with_moveit:
-        raise ValueError('with_executor:=true requires with_moveit:=true')
-    speed = float(argument('sim_speed_factor'))
-    if not math.isfinite(speed) or speed <= 0:
-        raise ValueError('sim_speed_factor must be a finite positive number')
-
-    bringup = Path(get_package_share_directory('my_robot_bringup'))
-    world = Path(get_package_share_directory('my_robot_world'))
-    robot = Path(get_package_share_directory('my_robot_description'))
-    runtime = tempfile.TemporaryDirectory(prefix='piper_world_')
-    model_path = Path(runtime.name) / 'world.xml'
-    try:
-        # The same scene loader serves the world preview and the controlled runtime.
-        export_scene(model_path, world, robot, robot_model=argument('robot_model'),
-                     scene_file=argument('scene_file'), camera_config=argument('camera_config'))
-        description = xacro.process_file(
-            str(robot / 'urdf/piper_control.urdf.xacro'),
-            mappings={'headless': argument('headless'), 'sim_speed_factor': argument('sim_speed_factor'),
-                      'model_path': str(model_path)},
-        ).toxml()
-    except Exception:
-        runtime.cleanup()
-        raise
-
-    with_camera = IfCondition(LaunchConfiguration('with_camera')).evaluate(context)
+    with_motion = IfCondition(LaunchConfiguration('with_motion')).evaluate(context)
     with_perception = IfCondition(LaunchConfiguration('with_perception')).evaluate(context)
-    plugins_file = ''
-    if with_camera:
-        # Use the same camera and input topics as the scene and perception nodes.
-        camera = yaml.safe_load(Path(argument('camera_config')).read_text())
-        perception = yaml.safe_load(Path(argument('perception_config')).read_text())
-        color = perception['color_detector']['ros__parameters']
-        depth = perception['depth_localizer']['ros__parameters']
-        plugin = {
-            'type': 'mujoco_ros2_control_plugins/CameraPlugin',
-            'camera_publish_rate': float(camera['update_rate']),
-            camera['name']: {
-                'policy': 'streaming', 'frame_name': camera['frame'],
-                'image_topic': argument('image_topic') or color['image_topic'],
-                'depth_topic': argument('depth_topic') or depth['depth_topic'],
-                'info_topic': argument('camera_info_topic') or depth['camera_info_topic'],
-            },
-        }
-        plugins_file = str(Path(runtime.name) / 'camera_plugin.yaml')
-        Path(plugins_file).write_text(yaml.safe_dump({
-            '/**': {'ros__parameters': {'mujoco_plugins': {'camera_publisher': plugin}}}
-        }))
+    if with_motion and not with_moveit:
+        raise ValueError('with_motion:=true requires with_moveit:=true')
+    if with_perception and not with_motion:
+        raise ValueError('with_perception:=true requires with_motion:=true')
+    bringup = Path(get_package_share_directory('my_robot_bringup'))
 
-    robot_parameters = {
-        'robot_description': ParameterValue(description, value_type=str),
-        'use_sim_time': True,
-    }
-    control = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(str(bringup / 'launch/ros2_control.launch.py')),
-        launch_arguments={
-            'headless': argument('headless'), 'sim_speed_factor': argument('sim_speed_factor'),
-            'robot_description': description, 'controllers_file': argument('controllers_file'),
-            'plugins_file': plugins_file,
-        }.items(),
-    )
-    nodes = motion_nodes(context, robot_parameters, with_executor) if with_moveit else []
+    # Share the perception output when both layers run; otherwise let the
+    # standalone planner use its own configured object source.
+    objects_topic = argument('objects_topic')
+    if with_perception and not objects_topic:
+        perception_config = yaml.safe_load(Path(argument('perception_config')).read_text())
+        objects_topic = perception_config['depth_localizer']['ros__parameters']['objects_topic']
+    layers = [control_layer(bringup, argument)]
+    if with_motion:
+        layers.append(motion_layer(bringup, argument, objects_topic))
     if with_perception:
-        perception_arguments = {
-            name: argument(name) for name in PERCEPTION_ARGUMENTS
-        }
-        perception_arguments['use_sim_time'] = 'true'
-        nodes.append(IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(bringup / 'launch/perception.launch.py')),
-            launch_arguments=perception_arguments.items(),
-        ))
-    return [
-        RegisterEventHandler(OnShutdown(on_shutdown=lambda event, context: runtime.cleanup())),
-        LogInfo(msg=f'MuJoCo complete world: {model_path}'),
-        control, *nodes,
-    ]
+        layers.append(perception_layer(bringup, argument))
+    return layers
 
 
 def generate_launch_description():
@@ -173,41 +174,51 @@ def generate_launch_description():
     moveit = Path(get_package_share_directory('my_robot_moveit_pkg'))
     commander = Path(get_package_share_directory('my_robot_commander'))
     perception = Path(get_package_share_directory('my_robot_perception'))
+    planner = Path(get_package_share_directory('my_robot_planner'))
     arguments = [
-        DeclareLaunchArgument('headless', default_value='false', choices=['true', 'false'],
+        DeclareLaunchArgument('launch_config', default_value='',
+                              description='Optional external YAML with launch argument defaults'),
+        config_argument('headless', default_value='false', choices=['true', 'false'],
                               description='Run without the MuJoCo window'),
-        DeclareLaunchArgument('with_perception', default_value='true', choices=['true', 'false'],
-                              description='Start color detection and depth localization'),
-        DeclareLaunchArgument('with_camera', default_value=LaunchConfiguration('with_perception'),
-                              choices=['true', 'false'], description='Publish MuJoCo RGB, depth and camera info'),
-        DeclareLaunchArgument('with_moveit', default_value='true', choices=['true', 'false'],
+        config_argument('with_moveit', default_value='true', choices=['true', 'false'],
                               description='Start the MoveIt motion planning server'),
-        DeclareLaunchArgument('with_executor', default_value=LaunchConfiguration('with_moveit'),
-                              choices=['true', 'false'], description='Start pick/place and named motion APIs'),
-        DeclareLaunchArgument('sim_speed_factor', default_value='1.0',
+        config_argument('with_executor', default_value=LaunchConfiguration('with_moveit'),
+                              choices=['true', 'false'], description='Legacy default for with_motion'),
+        config_argument('with_motion', default_value=LaunchConfiguration('with_executor'),
+                              choices=['true', 'false'], description='Start executor and task planner'),
+        config_argument('with_perception', default_value=LaunchConfiguration('with_motion'),
+                              choices=['true', 'false'], description='Start color detection and depth localization'),
+        config_argument('with_camera', default_value=LaunchConfiguration('with_perception'),
+                              choices=['true', 'false'], description='Publish MuJoCo RGB, depth and camera info'),
+        config_argument('sim_speed_factor', default_value='1.0',
                               description='Positive simulation speed relative to wall time'),
-        DeclareLaunchArgument('scene_file', default_value=str(world / 'basic/preview.xml'),
+        config_argument('scene_file', default_value=str(world / 'basic/preview.xml'),
                               description='World scene including ground, objects and robot placeholder'),
-        DeclareLaunchArgument('robot_model', default_value=str(robot / 'mjcf/control.xml'),
+        config_argument('robot_model', default_value=str(robot / 'mjcf/control.xml'),
                               description='Robot MJCF including ros2_control actuators'),
-        DeclareLaunchArgument('camera_config', default_value=str(world / 'config/camera.yaml'),
+        config_argument('camera_config', default_value=str(world / 'config/camera.yaml'),
                               description='MuJoCo wrist camera configuration'),
-        DeclareLaunchArgument('controllers_file', default_value=str(robot / 'config/ros2_controllers.yaml'),
+        config_argument('controllers_file', default_value=str(robot / 'config/ros2_controllers.yaml'),
                               description='ros2_control controllers and tolerances'),
-        DeclareLaunchArgument('moveit_controllers_file',
+        config_argument('moveit_controllers_file',
                               default_value=str(moveit / 'config/moveit_controllers.yaml'),
                               description='MoveIt trajectory controller mapping'),
-        DeclareLaunchArgument('planning_pipeline', default_value='ompl',
+        config_argument('planning_pipeline', default_value='ompl',
                               description='MoveIt planning pipeline'),
-        DeclareLaunchArgument('manipulation_config', default_value=str(commander / 'config/manipulation.yaml'),
+        config_argument('planner_config', default_value=str(planner / 'config/task_planner.yaml'),
+                              description='Sorting task planner configuration'),
+        config_argument('pick_place_action', default_value='', description='Pick/place action; empty uses YAML'),
+        config_argument('sort_action', default_value='', description='Sorting action; empty uses YAML'),
+        config_argument('observation_target', default_value='', description='Observation pose; empty uses YAML'),
+        config_argument('manipulation_config', default_value=str(commander / 'config/manipulation.yaml'),
                               description='Executor and MotionController options'),
     ]
     for name, description in PERCEPTION_ARGUMENTS.items():
         default = str(perception / 'config/perception.yaml') if name == 'perception_config' else ''
         suffix = '' if name == 'perception_config' else '; empty uses perception_config'
-        arguments.append(DeclareLaunchArgument(name, default_value=default, description=description + suffix))
+        arguments.append(config_argument(name, default_value=default, description=description + suffix))
     for name, (_, description) in EXECUTION_ARGUMENTS.items():
-        arguments.append(DeclareLaunchArgument(
+        arguments.append(config_argument(
             name, default_value='', description=description + '; empty uses manipulation_config',
         ))
     return LaunchDescription([*arguments, OpaqueFunction(function=launch_setup)])

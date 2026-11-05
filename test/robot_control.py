@@ -31,6 +31,7 @@ def main():
         env['ROS_DOMAIN_ID'] = str(args.ros_domain_id)
     command = [
         'ros2', 'launch', 'my_robot_bringup', 'ros2_control.launch.py',
+        'with_moveit:=false', 'robot_only:=true',
         f'headless:={str(args.headless).lower()}',
         f'sim_speed_factor:={args.sim_speed_factor}',
     ]

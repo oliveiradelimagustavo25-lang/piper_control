@@ -58,7 +58,7 @@ def generate_launch_description():
     arguments = [
         DeclareLaunchArgument('perception_config', default_value=str(perception / 'config/perception.yaml'),
                               description='Color and depth node parameters'),
-        DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false'],
+        DeclareLaunchArgument('use_sim_time', default_value='true', choices=['true', 'false'],
                               description='Use ROS simulation time'),
         DeclareLaunchArgument('show_window', default_value='',
                               description='Show color debug window; empty uses perception_config'),

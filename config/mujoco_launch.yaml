@@ -1,0 +1,48 @@
+# 总入口的常用默认参数。修改后重新运行脚本，无需重新构建。
+# 只填写需要覆盖的参数；其余使用 launch 或节点 YAML 默认值。
+headless: false
+show_window: true
+sim_speed_factor: 1.0
+
+# 分层开关默认按依赖联动：MoveIt -> motion -> perception -> camera。
+# with_moveit: true
+# with_motion: true
+# with_perception: true
+# with_camera: true
+
+# 默认读取工作区源码中的 YAML；路径相对于本文件所在目录。
+camera_config: ../src/my_robot_world/config/camera.yaml
+controllers_file: ../src/my_robot_description/config/ros2_controllers.yaml
+moveit_controllers_file: ../src/my_robot_moveit_pkg/config/moveit_controllers.yaml
+manipulation_config: ../src/my_robot_commander/config/manipulation.yaml
+planner_config: ../src/my_robot_planner/config/task_planner.yaml
+perception_config: ../src/my_robot_perception/config/perception.yaml
+
+# 可选的世界与规划配置（未设置时使用安装目录中的默认资源）。
+# scene_file: ../src/my_robot_world/basic/preview.xml
+# robot_model: ../src/my_robot_description/mjcf/control.xml
+# planning_pipeline: ompl
+# observation_target: pose_1
+
+# 可选的话题和 Action；相应的发布者、订阅者或客户端会共同使用。
+# image_topic: /camera_sensor/image_raw
+# depth_topic: /camera_sensor/depth/image_raw
+# camera_info_topic: /camera_sensor/camera_info
+# labels_topic: /perception/color_labels
+# debug_topic: /perception/color_debug
+# points_topic: /perception/object_points
+# objects_topic: /perception/objects
+# publish_debug: true
+# pick_place_action: /manipulation/pick_place
+# move_to_named_action: /manipulation/move_to_named
+# sort_action: /sorting/sort_objects
+
+# 可选的执行参数；命令行中同名参数优先。
+# arm_group: arm
+# gripper_group: gripper
+# reference_frame: base_link
+# end_effector_link: link6
+# velocity_scaling: 0.2
+# acceleration_scaling: 0.2
+# planning_time: 5.0
+# cartesian_step: 0.005

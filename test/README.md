@@ -49,7 +49,7 @@ python3 test/robot_control.py --headless         # 不显示窗口，仍保持�
 python3 test/robot_control.py --ros-domain-id 184 # 可选独立 ROS 域
 ```
 
-先构建并加载工作区。此脚本复用 `ros2_control.launch.py`，只加载机器人本体和八个关节的控制接口，不自动发送动作；保持运行直到关闭 MuJoCo 窗口或按 Ctrl+C。默认继承终端的 ROS 域，便于另一个相同环境的终端发送测试指令。
+先构建并加载工作区。此脚本复用 `ros2_control.launch.py`，显式设置 `robot_only:=true` 并关闭 MoveIt，只加载机器人本体和八个关节的控制接口，不自动发送动作；保持运行直到关闭 MuJoCo 窗口或按 Ctrl+C。默认继承终端的 ROS 域，便于另一个相同环境的终端发送测试指令。
 
 主要接口是 `/joint_states`、`/clock`、`/arm_controller/follow_joint_trajectory` 和 `/gripper_controller/follow_joint_trajectory`。例如在另一终端测试夹爪：
 

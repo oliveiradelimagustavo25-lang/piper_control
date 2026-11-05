@@ -120,6 +120,7 @@ def main():
     os.environ.update(ROS_DOMAIN_ID=str(args.ros_domain_id), ROS_LOCALHOST_ONLY='1')
     process = subprocess.Popen(
         ['ros2', 'launch', 'my_robot_bringup', 'ros2_control.launch.py',
+         'with_moveit:=false', 'robot_only:=true',
          f'headless:={str(not args.viewer).lower()}'], env=env, start_new_session=True)
     node = None
     try:

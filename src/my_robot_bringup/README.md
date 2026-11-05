@@ -1,122 +1,138 @@
 # my_robot_bringup
 
-`mujoco.launch.py` 是完整世界的正式入口，默认加载机器人、棋盘格地面、三色物块、标记板和腕部相机，并启动 ros2_control、MoveIt、`pick_place_executor` 及颜色与深度感知。`ros2_control.launch.py` 是共享的控制启动层，单独启动时只加载机器人本体，供交互控制阶段测试复用。`perception.launch.py` 可单独启动颜色检测和深度定位，输入来自已有 ROS 相机。
+`mujoco.launch.py` 是完整世界的总入口，负责按层组织启动。世界组合和统一机器人描述由 `ros2_control.launch.py` 完成，再传给 motion 层：
+
+1. `ros2_control.launch.py`：MuJoCo、机器人状态、ros2_control 和 MoveIt；物理及 `/clock` 只有一个所有者。
+2. `motion_control.launch.py`：抓放执行器 `pick_place_executor` 和任务规划器 `task_planner`；`motion_controller.cpp` 是执行器使用的库。
+3. `perception.launch.py`：颜色分割和深度定位。原生相机插件属于仿真控制层。
+
+总入口默认启动三层，但启动节点不会自动抓取；必须向分拣 Action 发送目标。直接启动 `ros2_control.launch.py` 默认也会加载完整世界、相机、控制器和 MoveIt，不会启动 motion 和 perception。机器人本体阶段测试显式使用 `robot_only:=true with_moveit:=false`。
 
 ```bash
-cd /home/ltt/piper_control
 source /opt/ros/humble/setup.bash
 colcon build
 source install/setup.bash
 ros2 launch my_robot_bringup mujoco.launch.py
 ros2 launch my_robot_bringup mujoco.launch.py --show-args
+
+# 只启动完整世界、控制器与 MoveIt，不启动任务和识别节点
+ros2 launch my_robot_bringup ros2_control.launch.py
+
+# 各分层的默认参数
+ros2 launch my_robot_bringup ros2_control.launch.py --show-args
+ros2 launch my_robot_bringup motion_control.launch.py --show-args
+ros2 launch my_robot_bringup perception.launch.py --show-args
 ```
 
-构建后重新加载 `install/setup.bash`，新终端也需要加载工作区环境。
+## 外部总配置与覆盖关系
 
-完整世界启动后，可在同一 ROS 域的另一终端打开 MoveIt RViz：
+脚本默认把工作区 [config/mujoco_launch.yaml](../../config/mujoco_launch.yaml) 作为 `launch_config` 传入总入口；修改该文件后重新运行脚本，不需要重新构建。也可以直接指定：
 
 ```bash
-source install/setup.bash
-ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
+ros2 launch my_robot_bringup mujoco.launch.py launch_config:="$PWD/config/mujoco_launch.yaml"
+ros2 launch my_robot_bringup mujoco.launch.py --show-args
 ```
 
-统一配置在 `my_robot_moveit_pkg/config/moveit.rviz`，固定坐标系为 `world`；MoveIt 的 MotionPlanning 显示默认开启，RobotModel 和 TF 可在显示面板按需勾选。`mujoco.launch.py` 本身不会自动打开 RViz，RViz 不会额外推进物理。当前没有对象识别 Action 时，RViz 会报告 `/recognize_objects` 不可用；MuJoCo 物块也尚未同步到 MoveIt 规划场景。
+直接运行 `mujoco.launch.py` 而不传 `launch_config` 时使用其自身默认值，不会自动读取脚本的外部文件。总配置是 launch 参数的平铺映射，支持 `--show-args` 中除 `launch_config` 本身之外的参数；未写入或写为 `null` 的参数使用原默认值。配置路径可为绝对路径或相对于总 YAML 的路径，写错参数名会明确报错。`--show-args` 显示可用参数及原始回退值，文件中的实际配置请直接查看 YAML。`ROS_DOMAIN_ID` 属于环境变量，通过脚本的 `--ros-domain-id` 或终端环境设置，不写入总配置。
 
-若系统更新后提示找不到旧版本 MoveIt 共享库，应重新配置并编译依赖它的工作区包；本次诊断与重建方法见[系统库检查报告](../../docs/2026-11-03_system_library_audit.md)。
+常规参数的优先级是：**命令行显式参数 > 外部总 YAML 中同名参数 > 对应节点 YAML 的值 > 节点代码默认值**。launch 参数留空表示不覆盖节点 YAML。总入口还会主动同步跨节点接口：
 
-## 窗口不显示时
+- 相机 RGB、深度及 CameraInfo 的显式 launch 参数会覆盖感知 YAML 中的对应话题，并同时用于相机发布和感知订阅；留空则使用感知 YAML。
+- 感知层启用时，规划器的 `objects_topic` 与深度节点输出一致；显式 launch 参数优先，否则使用感知 YAML 的值，会覆盖规划器 YAML 中的同名输入。关闭感知时则使用规划器 YAML，除非显式指定 `objects_topic`。
+- 执行器的抓放和命名动作名称会同步给任务规划器；规划器 YAML 中相应名称因此会被执行器配置或 launch 参数覆盖。`pick_place_action` 和旧别名 `action_name` 同时指定且不一致时会报错。
+- 为保持几何一致，规划器的 `reference_frame`、`end_effector_frame`、`tool_to_tcp` 由执行器配置（或相应 launch 参数）统一提供，可能覆盖规划器 YAML。三个分层由总入口启动时统一使用仿真时钟。
 
-`show_window:=true` 仅打开颜色检测调试窗口；MuJoCo 窗口由 `headless` 控制，默认为 `false`。颜色窗口需要收到相机图像后才会刷新。如果两个窗口都没有出现，先检查启动日志中控制器是否成功加载 `MujocoSystem`、相机插件是否启动，而不是只调整 `show_window`。
+默认总 YAML 将下列配置文件指向工作区源码，因此修改这些 YAML 后重新启动脚本即可；总配置和节点 YAML 只在启动时读取，不会动态更新运行中的节点。
 
-当日志显示 `Loading hardware 'webots'` 或找不到 `mujoco_ros2_control/MujocoSystem` 时，控制器接收到的不是本工作区使用 `mujoco_ros2_control/MujocoSystemInterface` 的描述。它与机器人状态发布器通过 `/robot_description` 通信；同一 ROS 域的其他发布器可能导致描述竞争。可先停止自己启动的旧仿真并检查 `./script/clear.sh --dry-run`；若仍有冲突，选择没有其他仿真的 ROS 域：
+| 总配置路径参数 | 配置用途 | 实际读取位置 |
+| --- | --- | --- |
+| `camera_config` | 相机名称、视野、分辨率和发布频率 | `ros2_control.launch.py`、世界加载器 |
+| `controllers_file` | 控制器、关节和容差 | `ros2_control.launch.py`、控制器管理器 |
+| `moveit_controllers_file` | MoveIt 到轨迹控制器的映射 | 控制层和 motion 层的 MoveItConfigsBuilder |
+| `manipulation_config` | 抓放执行、TCP、运动配置 | `motion_control.launch.py` |
+| `planner_config` | 分拣策略、观察姿态、放置位置 | `motion_control.launch.py` |
+| `perception_config` | 颜色、深度过滤、话题和物块尺寸 | 总入口、控制层的相机配置、`perception.launch.py` |
 
-```bash
-# 同一 ROS 域中的其他终端也须设置相同的 ROS_DOMAIN_ID。
-export ROS_DOMAIN_ID=227
-ros2 launch my_robot_bringup mujoco.launch.py show_window:=true
-```
+`MoveItConfigsBuilder` 自动加载的 `kinematics.yaml`、`joint_limits.yaml`、`sensors_3d.yaml` 等默认来自安装的 MoveIt 配置包；它们不在上述六条路径内。修改这些源码配置后仍需重新构建或使用适当的符号链接安装，修改 Python/C++、URDF 等资源同样不能一概认为不需要构建。直接单独启动各层时，如果没有传路径，默认使用安装目录内的配置。
 
-可用 `ros2 node list --no-daemon` 和 `ros2 topic info /robot_description --verbose --no-daemon` 检查当前域。域号 227 只是示例，请使用未被其他仿真占用的域；不要仅因节点名称相同就终止其他机器或其他项目的进程。图形窗口还要求当前终端能连接可用的图形会话。
-
-## 模型与控制的连接
-
-世界加载器把 `my_robot_world/basic/preview.xml` 与机器人 `mjcf/control.xml` 组合，将场景展开为临时 MJCF，并使用绝对资源路径。`my_robot_description/urdf/piper_control.urdf.xacro` 引入机器人 URDF 和独立的 `piper_ros_control.xacro`；其 `model_path` 指向该场景，插件加载的是真实完整世界。控制器配置位于 `my_robot_description/config/ros2_controllers.yaml`，bringup 通过参数选择它。临时文件在 launch 退出时清理，源码与安装目录均不生成运行文件。
-
-ros2_control 插件是唯一的物理推进与 `/clock` 发布者；正式启动不运行 `test/mujoco_world.py`，也不创建第二个 Python 仿真实例。机器人状态发布、MoveIt 和执行端使用相同的 URDF 与仿真时间。
-
-## 启动参数
+## 层级与参数
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
-| `headless` | `false` | 隐藏 MuJoCo 窗口，保留物理和 ROS 接口 |
-| `with_perception` | `true` | 启动颜色检测和深度定位 |
-| `with_camera` | 跟随 `with_perception` | 启用 MuJoCo 原生相机，发布 RGB、深度与内参 |
-| `with_moveit` | `true` | 启动 `move_group` |
-| `with_executor` | 跟随 `with_moveit` | 启动抓放、命名姿态 Action；需要 MoveIt |
-| `sim_speed_factor` | `1.0` | 有限正数，目标仿真倍率 |
-| `scene_file` | 世界包 `basic/preview.xml` | 地面、物体、标记板组成的场景 |
-| `robot_model` | 描述包 `mjcf/control.xml` | 含执行器的机器人 MJCF |
-| `camera_config` | 世界包 `config/camera.yaml` | 腕部相机配置 |
-| `controllers_file` | description `config/ros2_controllers.yaml` | ros2_control 控制器、关节和容差 |
-| `moveit_controllers_file` | MoveIt 包 `config/moveit_controllers.yaml` | MoveIt 到轨迹控制器的映射 |
-| `planning_pipeline` | `ompl` | MoveIt 运动规划管线 |
-| `manipulation_config` | commander `config/manipulation.yaml` | 执行器及 MotionController 参数 |
+| `with_moveit` | `true` | 启动 MoveIt；关闭后不能启用 motion |
+| `with_motion` | 跟随 `with_executor` | 启动执行器和任务规划器 |
+| `with_perception` | 跟随 `with_motion` | 启动颜色、深度节点；依赖 motion |
+| `with_executor` | 跟随 `with_moveit` | 旧参数，作为 `with_motion` 的默认值 |
+| `with_camera` | 跟随 `with_perception` | 发布 MuJoCo RGB、深度和内参 |
+| `headless` | `false` | 隐藏 MuJoCo 窗口 |
+| `sim_speed_factor` | `1.0` | 仿真速度倍率 |
+| `scene_file`、`robot_model`、`camera_config` | 世界和描述包配置 | 世界、机器人模型及相机配置 |
+| `controllers_file`、`moveit_controllers_file` | 各包配置 | ros2_control 和 MoveIt 控制器映射 |
+| `planning_pipeline` | `ompl` | MoveIt 规划管线 |
+| `manipulation_config`、`planner_config`、`perception_config` | 各包配置 | 执行、任务规划和视觉配置 |
 
-感知默认配置位于 `my_robot_perception/config/perception.yaml`。`perception_config` 可以指定替代文件；以下参数留空时使用该文件对应的值，主入口和独立感知入口都支持：
+独立 `ros2_control.launch.py` 默认使用世界包的 `basic/preview.xml`、相机配置和描述包的 `mjcf/control.xml`；其 `with_camera:=auto` 在完整世界发布 RGB-D，在 `robot_only:=true` 时关闭相机发布。可通过 `scene_file`、`model_path`、`camera_config`、`perception_config` 和相机话题参数覆盖默认值。`plugins_file` 可指定原生插件配置；`robot_description` 是可选的已展开描述。motion 的参数默认来自对应 YAML，perception 默认从 `perception.yaml` 取话题和阈值；单独启动 motion 需要已有控制和 MoveIt，单独启动 perception 需要已有图像输入。三个分层默认使用仿真时间；如果 perception 单独连接系统时间的外部相机，需要显式传入 `use_sim_time:=false`。
 
-| 参数 | 作用 |
-| --- | --- |
-| `image_topic`、`depth_topic`、`camera_info_topic` | RGB、对齐深度和内参输入；主入口中的相机插件同步使用这些话题 |
-| `labels_topic`、`debug_topic` | 颜色标签及调试图像话题；标签话题同时连接两个节点 |
-| `points_topic`、`objects_topic` | 目标点云和物体信息输出话题 |
-| `show_window`、`publish_debug` | 是否显示或发布颜色调试图像，传 `true` 或 `false` |
+`with_motion:=true with_moveit:=false` 和 `with_perception:=true with_motion:=false` 会明确报错。层级约束适用于总入口；独立的 `perception.launch.py` 可连接已有相机测试。
 
-颜色 HSV 阈值、面积、深度过滤、物块尺寸、坐标系和同步容差等均在 `perception_config` 中调整。`perception.launch.py` 的 `use_sim_time` 默认 `false`；由 MuJoCo 主入口启动时固定为 `true`。
+执行端和任务规划器共享 `pick_place_action`、`move_to_named_action`；`sort_action` 指分拣 Action。旧 `action_name` 是 `pick_place_action` 的兼容别名，同时传入且不一致时会报错。`objects_topic` 同时配置深度定位输出和任务规划输入；关闭感知层时，未显式指定它则使用规划器 YAML 中的输入话题。RGB、深度及 CameraInfo 话题同时用于相机和感知节点。留空时使用对应 YAML；执行和规划节点的坐标系、末端链接与 TCP 从执行配置统一传入。`observation_target` 可覆盖规划器观察姿态。
 
-以下参数可直接覆盖执行配置，留空表示使用 `manipulation_config` 的值：
-
-| 参数 | 对应功能 |
-| --- | --- |
-| `action_name`、`move_to_named_action` | 抓放和命名姿态 Action 名称 |
-| `arm_group`、`gripper_group` | MoveIt 规划组 |
-| `reference_frame`、`end_effector_link` | 目标参考坐标系与末端 link |
-| `velocity_scaling`、`acceleration_scaling` | 运动速度和加速度倍率 |
-| `planning_time`、`cartesian_step` | 规划时间和笛卡尔路径插值步长 |
-
-TCP、抓取朝向、偏移、抬升距离、夹爪符号等完整参数通过执行 YAML 配置。优先级为配置默认值、显式 launch 覆盖；机器人描述和 `use_sim_time=true` 由启动层统一提供。模型执行器增益仍配置在机器人 MJCF 中。
+`image_topic`、`depth_topic`、`camera_info_topic`、`labels_topic`、`debug_topic`、`points_topic`、`objects_topic`、`show_window` 和 `publish_debug` 可直接覆盖感知配置。运动常用覆盖包括 `arm_group`、`gripper_group`、`reference_frame`、`end_effector_link`、`velocity_scaling`、`acceleration_scaling`、`planning_time` 和 `cartesian_step`；详细颜色阈值、抓取距离与放置位置仍在对应 YAML。
 
 ```bash
-# 完整世界，无窗口；覆盖执行端的常用运动参数
-ros2 launch my_robot_bringup mujoco.launch.py headless:=true velocity_scaling:=0.15 planning_time:=3.0
+# 完整世界及 MoveIt，不启动后两层
+ros2 launch my_robot_bringup mujoco.launch.py with_motion:=false
 
-# 完整世界和控制器，关闭 MoveIt、执行器及感知
-ros2 launch my_robot_bringup mujoco.launch.py with_moveit:=false with_perception:=false
+# 启动 motion，不启动 perception
+ros2 launch my_robot_bringup mujoco.launch.py with_perception:=false
 
-# 外部相机已发布 ROS 图像时，只运行两个感知节点
-ros2 launch my_robot_bringup perception.launch.py
+# 全部启动并覆盖共同物体话题
+ros2 launch my_robot_bringup mujoco.launch.py objects_topic:=/vision/objects
 
-# 完整世界中覆盖图像和深度话题，相机与感知会使用相同名称
-ros2 launch my_robot_bringup mujoco.launch.py image_topic:=/vision/rgb depth_topic:=/vision/depth
+# 只加载机器人本体和控制器，不启动 MoveIt
+ros2 launch my_robot_bringup ros2_control.launch.py robot_only:=true with_moveit:=false
 
-# 保留 MoveIt 接口，关闭抓放执行节点
-ros2 launch my_robot_bringup mujoco.launch.py with_executor:=false
-
-# 机器人本体的交互控制阶段测试
+# 单独控制阶段测试
 python3 test/robot_control.py
 ```
 
-## 接口承接
+启动请求的顺序不代表节点已就绪。任务规划器会等待 Action 和观测；外部客户端应确认接口可用后发送目标。
 
-| 层 | 对外接口或职责 |
-| --- | --- |
-| ros2_control | `/joint_states`、`/clock`、控制器管理服务 |
-| 机械臂控制器 | `/arm_controller/follow_joint_trajectory` |
-| 夹爪控制器 | `/gripper_controller/follow_joint_trajectory` |
-| 相机与感知 | 默认 `/camera_sensor/image_raw`、`/camera_sensor/depth/image_raw`、`/camera_sensor/camera_info`；输出 `/perception/color_labels`、`/perception/object_points` 和 `/perception/objects` |
-| MoveIt `move_group` | 运动规划与轨迹执行接口 |
-| `pick_place_executor` | 默认 `/manipulation/pick_place`、`/manipulation/move_to_named` |
-| `motion_controller.cpp` | 由执行器链接使用的运动库，承接 MoveIt 调用 |
+## 分层启动完整项目
 
-当前启动颜色检测和深度定位，不启动 ArUco 检测或 `my_robot_planner` 任务策略。MuJoCo 原生相机插件与控制器共用同一物理世界，独立感知启动文件不会创建相机或推进物理；`with_camera:=false` 可改用外部 ROS 相机。相机即使在 `headless:=true` 时也需要可用的 OpenGL 渲染环境。MuJoCo 物块尚未自动同步为 MoveIt 碰撞物体，画面可见性与定位精度仍需校准，当前启动流程不代表抓取或分拣已验收。
+可以使用三个终端依次启动。三个终端都要加载 ROS 与工作区，并设置同一个**空闲** ROS 域；以下 `227` 只是示例：
 
-当前环境中，部分 C++ 节点退出时仍可能出现析构异常，不能仅凭 launch 返回 0 判断子进程正常退出。详细测试和限制见[本轮开发报告](../../docs/2026-11-02_world_control_roles.md)。
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+export ROS_DOMAIN_ID=227
+```
+
+三个终端分别执行：
+
+```bash
+# 终端 1：完整世界、相机、控制器、MoveIt；等待启动完成
+ros2 launch my_robot_bringup ros2_control.launch.py
+
+# 终端 2：执行器、任务规划器；等待 PickPlace executor ready
+ros2 launch my_robot_bringup motion_control.launch.py
+
+# 终端 3：颜色检测、深度定位
+ros2 launch my_robot_bringup perception.launch.py
+```
+
+控制层是唯一的 MuJoCo 物理推进者；另外两层不会创建新的仿真。与一次启动的 `mujoco.launch.py` 一样，节点上线不会自动抓取。三个分层默认的相机话题、物体话题和 Action 名称一致；如果单独覆盖某一层的接口名称，需要在使用同一接口的其他层传入相同值。总入口则会统一传递这些参数。
+
+## 三色任务和调试
+
+[脚本说明](../../script/README.md)介绍环境准备、自动触发分拣，以及直接使用 launch 时如何手动发送 Action。`show_window:=true` 控制颜色窗口；MuJoCo 窗口由 `headless` 控制。即使 `headless:=true`，相机插件仍需要 OpenGL 环境。
+
+若日志显示加载 `webots` 或找不到 `mujoco_ros2_control/MujocoSystem`，可能是同 ROS 域的其他发布者提供了错误的 `/robot_description`。先检查同域节点，使用空闲 `ROS_DOMAIN_ID` 再启动；不要直接全局杀掉其他项目的节点。
+
+MoveIt RViz 可在相同域单独启动：
+
+```bash
+ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
+```
+
+MuJoCo 物块尚未自动同步为 MoveIt 碰撞物体，任务运动完成不代表最终放置位置已核验。现有环境中部分 C++ 进程退出时仍可能出现析构异常，需结合子进程日志检查。

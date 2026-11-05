@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# 启动完整仿真，在 pose_1 观察后依次执行三色抓放。
-set -eo pipefail
+# 启动三色仿真，到达观察姿态后执行一次分拣任务。
+set -e
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ros_domain=${ROS_DOMAIN_ID:-227}
-headless=false
-show_window=true
-strategy=color_order
-planner_config="$root/install/my_robot_planner/share/my_robot_planner/config/task_planner.yaml"
-launch_args=()
+headless=''
+show_window=''
+launch_config="$root/config/mujoco_launch.yaml"
+planner_config=''
 
 usage() {
     cat <<'HELP'
@@ -17,81 +16,75 @@ usage() {
   --ros-domain-id N       ROS 域（默认继承环境，否则使用 227）
   --headless              隐藏 MuJoCo 窗口
   --no-debug-window       隐藏颜色调试窗口
-  --strategy NAME         color_order（默认）或 nearest
+  --config FILE           总启动配置（默认 config/mujoco_launch.yaml）
   --planner-config FILE   任务规划器配置文件
   -h, --help              显示帮助
 
 例如: ./script/pick_three_colors.sh --ros-domain-id 227 -- sim_speed_factor:=0.5
-Ctrl+C 停止本脚本启动的仿真和任务节点。
+启动后自动移动到 pose_1，并执行一次三色分拣任务。
 HELP
 }
 
 while (( $# )); do
     case "$1" in
-        --ros-domain-id|--strategy|--planner-config)
+        --ros-domain-id|--planner-config|--config)
             if (( $# < 2 )); then echo "$1 需要一个值" >&2; exit 2; fi
             case "$1" in
                 --ros-domain-id) ros_domain=$2 ;;
-                --strategy) strategy=$2 ;;
-                --planner-config) planner_config=$2 ;;
+                --planner-config) planner_config=$(realpath -e "$2") ;;
+                --config) launch_config=$(realpath -e "$2") ;;
             esac
             shift 2 ;;
         --headless) headless=true; shift ;;
         --no-debug-window) show_window=false; shift ;;
         -h|--help) usage; exit 0 ;;
-        --) shift; launch_args=("$@"); break ;;
+        --) shift; break ;;
         *) echo "未知选项: $1" >&2; usage; exit 2 ;;
     esac
 done
-if [[ $strategy != color_order && $strategy != nearest ]]; then
-    echo '策略只能是 color_order 或 nearest。' >&2
-    exit 2
-fi
 
-if [[ ! -f $planner_config ]]; then
-    echo "找不到任务规划器配置: $planner_config" >&2
-    exit 1
-fi
-planner_config=$(realpath "$planner_config")
-
-# 加载本工作区的 ROS 环境，所有子进程继承同一 ROS 域。
 source /opt/ros/humble/setup.bash
 source "$root/install/setup.bash"
 export ROS_DOMAIN_ID=$ros_domain
 export PYTHONUNBUFFERED=1
 cd "$root"
 
-# 同域节点可能与仿真控制器或机器人描述冲突，启动前先检查。
-existing_nodes=$(timeout 8 ros2 node list --no-daemon) || {
-    echo '无法检查 ROS 域，请确认 ROS 环境和域号。' >&2
-    exit 1
-}
+# 避免与同一 ROS 域中其他控制器及机器人描述混用。
+existing_nodes=$(timeout 8 ros2 node list --no-daemon)
 if [[ -n $existing_nodes ]]; then
     printf 'ROS 域 %s 已有节点，请选择空闲域：\n%s\n' "$ROS_DOMAIN_ID" "$existing_nodes" >&2
     exit 1
 fi
 
-world_pid=''
-planner_pid=''
+args=("launch_config:=$launch_config")
+if [[ -n $headless ]]; then args+=("headless:=$headless"); fi
+if [[ -n $show_window ]]; then args+=("show_window:=$show_window"); fi
+if [[ -n $planner_config ]]; then args+=("planner_config:=$planner_config"); fi
+printf 'ROS 域: %s；总配置: %s\n' "$ROS_DOMAIN_ID" "$launch_config"
+if [[ -n $headless ]]; then printf '命令行覆盖 headless: %s\n' "$headless"; fi
+if [[ -n $show_window ]]; then printf '命令行覆盖 show_window: %s\n' "$show_window"; fi
+if [[ -n $planner_config ]]; then printf '规划器配置: %s\n' "$planner_config"; fi
+if (( $# )); then printf '额外启动参数:'; printf ' %q' "$@"; printf '\n'; fi
+# 将 launch 和动作客户端放入独立进程组，只清理由本脚本启动的进程。
+launch_pid=''
 action_pid=''
 tail_pid=''
 result_file=$(mktemp)
 cleanup() {
-    # 只停止本脚本创建的进程组，不使用按名称全局清理。
-    for pid in "$action_pid" "$planner_pid" "$world_pid"; do
+    for pid in "$action_pid" "$launch_pid"; do
         if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
             kill -INT -- "-$pid" 2>/dev/null || true
         fi
     done
     for _ in {1..10}; do
         alive=false
-        for pid in "$action_pid" "$planner_pid" "$world_pid"; do
+        for pid in "$action_pid" "$launch_pid"; do
             if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then alive=true; fi
         done
         $alive || break
         sleep 1
     done
-    for pid in "$action_pid" "$planner_pid" "$world_pid"; do
+    for pid in "$action_pid" "$launch_pid"; do
         if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
             kill -KILL -- "-$pid" 2>/dev/null || true
         fi
@@ -107,88 +100,89 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-echo "ROS 域: $ROS_DOMAIN_ID；正在启动 MuJoCo。"
-setsid ros2 launch my_robot_bringup mujoco.launch.py \
-    "headless:=$headless" "show_window:=$show_window" "${launch_args[@]}" &
-world_pid=$!
+setsid ros2 launch my_robot_bringup mujoco.launch.py "${args[@]}" "$@" &
+launch_pid=$!
+echo '等待机械臂控制器与命名姿态 Action 就绪……'
 
-# 控制器、执行 Action 和相机必须就绪，才发送会让机械臂运动的任务。
+# 读取执行器的实际 Action 名称，以兼容 YAML 和命令行覆盖。
 deadline=$((SECONDS + 120))
-ready=false
-while (( SECONDS < deadline )) && kill -0 "$world_pid" 2>/dev/null; do
+named_action=''
+while (( SECONDS < deadline )) && kill -0 "$launch_pid" 2>/dev/null; do
     controllers=$(timeout 5 ros2 control list_controllers 2>/dev/null | sed -E 's/\x1b\[[0-9;]*m//g' || true)
-    if [[ $(grep -Ec '^(arm_controller|gripper_controller|joint_state_broadcaster)[[:space:]].*[[:space:]]active([[:space:]]|$)' <<< "$controllers") != 3 ]]; then
+    if ! grep -Eq '^arm_controller[[:space:]].*[[:space:]]active([[:space:]]|$)' <<< "$controllers"; then
         sleep 1
         continue
     fi
-    pick_action=$(timeout 5 ros2 param get --no-daemon --hide-type /pick_place_executor action_name 2>/dev/null || true)
-    named_action=$(timeout 5 ros2 param get --no-daemon --hide-type /pick_place_executor move_to_named_action 2>/dev/null || true)
-    image_topic=$(timeout 5 ros2 param get --no-daemon --hide-type /color_detector image_topic 2>/dev/null || true)
-    objects_topic=$(timeout 5 ros2 param get --no-daemon --hide-type /depth_localizer objects_topic 2>/dev/null || true)
+    named_action=$(timeout 5 ros2 param get --no-daemon --hide-type \
+        /pick_place_executor move_to_named_action 2>/dev/null || true)
     actions=$(timeout 5 ros2 action list 2>/dev/null || true)
-    if [[ -n $pick_action && -n $named_action && -n $image_topic && -n $objects_topic ]] &&
-       grep -Fxq "$pick_action" <<< "$actions" && grep -Fxq "$named_action" <<< "$actions" &&
-       timeout 8 ros2 topic echo --once --qos-reliability best_effort "$image_topic" >/dev/null 2>&1; then
-        ready=true
+    if [[ -n $named_action ]] && grep -Fxq "$named_action" <<< "$actions"; then
         break
     fi
+    named_action=''
     sleep 1
 done
-if ! $ready; then
-    echo '仿真未就绪：请检查控制器、执行 Action 和相机图像。' >&2
+if [[ -z $named_action ]] || ! kill -0 "$launch_pid" 2>/dev/null; then
+    echo '命名姿态 Action 未就绪，请检查 MoveIt、控制器及 motion 层。' >&2
     exit 1
 fi
 
-echo '仿真已就绪；启动任务规划器并前往 pose_1。'
-# 读取节点的实际接口名称，保持 launch 覆盖参数与任务规划器一致。
-setsid ros2 run my_robot_planner task_planner --ros-args --params-file "$planner_config" \
-    -p use_sim_time:=true -p observation_target:=pose_1 \
-    -p "objects_topic:=$objects_topic" -p "pick_place_action:=$pick_action" \
-    -p "move_to_named_action:=$named_action" &
-planner_pid=$!
-deadline=$((SECONDS + 30))
+# Action 结果必须同时检查状态和 success：ROS 2 CLI 在失败时也可能返回 0。
+send_action() {
+    local action=$1 type=$2 goal=$3 label=$4
+    : > "$result_file"
+    setsid ros2 action send_goal --feedback "$action" "$type" "$goal" >"$result_file" 2>&1 &
+    action_pid=$!
+    tail -n +1 -f --pid="$action_pid" "$result_file" &
+    tail_pid=$!
+    while kill -0 "$action_pid" 2>/dev/null; do
+        if ! kill -0 "$launch_pid" 2>/dev/null; then
+            echo '仿真已退出，停止当前动作。' >&2
+            return 1
+        fi
+        sleep 1
+    done
+    wait "$action_pid" || true
+    wait "$tail_pid" || true
+    action_pid=''
+    tail_pid=''
+    if ! grep -Fq 'Goal finished with status: SUCCEEDED' "$result_file" ||
+       ! grep -Eq '^[[:space:]]*success: true' "$result_file"; then
+        echo "$label 失败，请检查上面的 Action 结果。" >&2
+        return 1
+    fi
+}
+
+echo "正在通过 $named_action 移动到 pose_1……"
+send_action "$named_action" my_robot_interface/action/MoveToNamed '{target: pose_1}' '移动到 pose_1'
+echo '已到达 pose_1，准备开始分拣。'
+
+# 任务规划器和执行器的接口名称由它们实际运行的配置决定。
+deadline=$((SECONDS + 60))
 sort_action=''
-while (( SECONDS < deadline )) && kill -0 "$planner_pid" 2>/dev/null && kill -0 "$world_pid" 2>/dev/null; do
-    sort_action=$(timeout 5 ros2 param get --no-daemon --hide-type /task_planner action_name 2>/dev/null || true)
+while (( SECONDS < deadline )) && kill -0 "$launch_pid" 2>/dev/null; do
+    sort_action=$(timeout 5 ros2 param get --no-daemon --hide-type \
+        /task_planner action_name 2>/dev/null || true)
+    pick_action=$(timeout 5 ros2 param get --no-daemon --hide-type \
+        /pick_place_executor action_name 2>/dev/null || true)
     actions=$(timeout 5 ros2 action list 2>/dev/null || true)
-    if [[ -n $sort_action ]] && grep -Fxq "$sort_action" <<< "$actions"; then
+    if [[ -n $sort_action && -n $pick_action ]] &&
+       grep -Fxq "$sort_action" <<< "$actions" && grep -Fxq "$pick_action" <<< "$actions"; then
         break
     fi
     sort_action=''
     sleep 1
 done
-if [[ -z $sort_action ]]; then
-    echo '任务规划器的分拣 Action 未就绪。' >&2
+if [[ -z $sort_action ]] || ! kill -0 "$launch_pid" 2>/dev/null; then
+    echo '分拣或抓放 Action 未就绪，请检查任务规划器和执行器。' >&2
     exit 1
 fi
 
-# ros2 action send_goal 在任务被拒绝或失败时也可能返回 0，因此检查结果内容。
-setsid ros2 action send_goal --feedback "$sort_action" \
-    my_robot_interface/action/SortObjects \
-    "{strategy: $strategy, color_order: [1, 2, 3]}" >"$result_file" 2>&1 &
-action_pid=$!
-tail -n +1 -f --pid="$action_pid" "$result_file" &
-tail_pid=$!
-while kill -0 "$action_pid" 2>/dev/null; do
-    if ! kill -0 "$world_pid" 2>/dev/null || ! kill -0 "$planner_pid" 2>/dev/null; then
-        echo '仿真或任务规划器已退出，停止当前任务。' >&2
-        exit 1
-    fi
-    sleep 1
-done
-wait "$action_pid" || true
-wait "$tail_pid" || true
-action_pid=''
-tail_pid=''
-if grep -Fq 'Goal finished with status: SUCCEEDED' "$result_file" &&
-   grep -Eq '^[[:space:]]*success: true' "$result_file"; then
-    echo '三色抓放动作已完成，请检查物块的实际放置结果。'
-    result=0
-else
-    echo '三色任务未成功完成，请检查上方结果和节点日志。' >&2
-    result=1
-fi
-
+echo "正在通过 $sort_action 开始分拣；策略和颜色顺序使用任务规划器配置。"
+send_action "$sort_action" my_robot_interface/action/SortObjects '{}' '三色分拣'
+echo '分拣动作序列已完成；物块最终位置仍需视觉确认。'
 echo '仿真保持运行，按 Ctrl+C 退出。'
-wait "$world_pid" || true
-exit "$result"
+if ! wait "$launch_pid"; then
+    echo '仿真启动进程异常退出，请检查上方日志。' >&2
+    exit 1
+fi
