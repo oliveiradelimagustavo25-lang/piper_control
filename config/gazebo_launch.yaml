@@ -1,0 +1,12 @@
+# Defaults for script/pick_three_colors.sh; command-line launch arguments win.
+gui: true
+use_rviz: true
+# The defaults keep MoveIt -> motion -> perception enabled in dependency order.
+# Cube positions use the same defaults as gazebo.launch.py and ros2_control.launch.py.
+# Paths are relative to this file and changes are read on the next launch.
+camera_config: ../src/my_robot_world/config/camera.yaml
+controllers_file: ../src/my_robot_description/config/ros2_controllers.yaml
+moveit_controllers_file: ../src/my_robot_moveit_pkg/config/moveit_controllers.yaml
+manipulation_config: ../src/my_robot_commander/config/manipulation.yaml
+planner_config: ../src/my_robot_planner/config/task_planner.yaml
+perception_config: ../src/my_robot_perception/config/perception.yaml

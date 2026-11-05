@@ -52,6 +52,7 @@ class PlannerFixture(unittest.TestCase):
         config = yaml.safe_load((ROOT / 'src/my_robot_planner/config/task_planner.yaml').read_text())
         config['task_planner']['ros__parameters'].update(
             observation_timeout=0.8, max_observation_age=0.3, observation_settle_time=0.03,
+            default_color_order=[1, 2, 3],
             **{'red.place_position': [0.60, 0.0, 0.005]})
         # 0.60 m 仅为模拟执行端的距离排序测试点，不发送给机械臂。
         config_path = cls.output / 'planner.yaml'

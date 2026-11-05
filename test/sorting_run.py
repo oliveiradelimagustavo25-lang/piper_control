@@ -47,10 +47,10 @@ def main(argv=None):
         gui = str(args.mode == 'gui').lower()
         with Processes(output) as processes:
             process = processes.start(display_command(args.mode) + [
-                'ros2', 'launch', 'my_robot_bringup', 'gazebo_robot_model.launch.py',
+                'ros2', 'launch', 'my_robot_bringup', 'gazebo.launch.py',
                 f'ros_domain_id:={args.ros_domain_id}', 'gui:=' + gui, 'use_rviz:=' + gui,
                 'world:=' + str(output / 'world.world'),
-                'task_planner_config:=' + str(output / 'task_planner.yaml')], 'bringup')
+                'spawn_objects:=false', 'planner_config:=' + str(output / 'task_planner.yaml')], 'bringup')
             rclpy.init(signal_handler_options=rclpy.signals.SignalHandlerOptions.NO)
             node = rclpy.create_node('sorting_script_client')
             check = None

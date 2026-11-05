@@ -1,25 +1,26 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" >
-    <xacro:macro name="gazebo_sensor_plugin">
+    <xacro:macro name="gazebo_sensor_plugin" params="camera_config">
+    <xacro:property name="settings" value="${xacro.load_yaml(camera_config)}"/>
     <gazebo reference="camera_link">
     <sensor type="depth" name="camera_sensor">
         <plugin name="depth_camera" filename="libgazebo_ros_camera.so">
             <frame_name>camera_optical_link</frame_name>  <!--设定从camera_optical_link为frame_id输出数据-->
             <!-- 与定位节点一致；插件默认 0.4 m 会过滤腕部相机的近距离物块。 -->
-            <min_depth>0.05</min_depth>
-            <max_depth>3.0</max_depth>
+            <min_depth>${settings['min_depth']}</min_depth>
+            <max_depth>${settings['max_depth']}</max_depth>
         </plugin>
         <always_on>true</always_on>
-        <update_rate>10</update_rate>
+        <update_rate>${settings['update_rate']}</update_rate>
         <camera name="camera">
-            <horizontal_fov>1.5009831567</horizontal_fov>
+            <horizontal_fov>${settings['horizontal_fov']}</horizontal_fov>
             <clip>
-                <near>0.02</near>
-                <far>3.0</far>
+                <near>${settings['near']}</near>
+                <far>${settings['far']}</far>
             </clip>
             <image> <!--图像数据-->
-                <width>800</width>
-                <height>600</height>
+                <width>${settings['width']}</width>
+                <height>${settings['height']}</height>
                 <format>R8G8B8</format>
             </image>
             <distortion>  

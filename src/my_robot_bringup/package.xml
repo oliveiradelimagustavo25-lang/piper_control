@@ -9,13 +9,19 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <exec_depend>my_robot_model</exec_depend>
+  <exec_depend>my_robot_world</exec_depend>
 
-  <exec_depend>demo_robot_pkg</exec_depend>
+  <exec_depend>my_robot_description</exec_depend>
   <exec_depend>my_robot_moveit_pkg</exec_depend>
   <exec_depend>my_robot_commander</exec_depend>
   <exec_depend>my_robot_perception</exec_depend>
   <exec_depend>my_robot_planner</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>moveit_configs_utils</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>xacro</exec_depend>
   <exec_depend>gazebo_ros</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>controller_manager</exec_depend>

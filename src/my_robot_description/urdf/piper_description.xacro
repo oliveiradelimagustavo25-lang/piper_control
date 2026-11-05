@@ -3,10 +3,10 @@
     
     <!--xacro文件也可以直接引入urdf文件，且不用解析宏-->
     <!-- Import piper urdf file -->
-    <xacro:include filename="$(find demo_robot_pkg)/urdf/piper_description.urdf" />
+    <xacro:include filename="$(find my_robot_description)/urdf/piper_description.urdf" />
 
     <!-- Import control_xacro -->
-    <xacro:include filename="$(find demo_robot_pkg)/urdf/piper.ros2_control.urdf" />
+    <xacro:include filename="$(find my_robot_description)/urdf/piper.ros2_control.urdf" />
 
 
 </robot>

@@ -96,9 +96,9 @@ def main(argv=None):
         gui = str(args.mode == 'gui').lower()
         with Processes(output) as processes:
             process = processes.start(display_command(args.mode) + [
-                'ros2', 'launch', 'my_robot_bringup', 'gazebo_robot_model.launch.py',
+                'ros2', 'launch', 'my_robot_bringup', 'gazebo.launch.py',
                 'ros_domain_id:=93', 'gui:=' + gui, 'use_rviz:=' + gui,
-                'use_task_planner:=false', 'world:=' + str(output / 'world.world'),
+                'use_task_planner:=false', 'with_perception:=false', 'spawn_objects:=false', 'world:=' + str(output / 'world.world'),
                 'manipulation_config:=' + str(output / 'manipulation.yaml'),
                 'robot_model:=' + str(output / 'robot.urdf')], 'bringup')
             with ExecutorSession(args, output, report, process) as session:

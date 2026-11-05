@@ -32,7 +32,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/base_link.STL" />
+          filename="package://my_robot_description/meshes/base_link.STL" />
       </geometry>
       <material
         name="">
@@ -46,7 +46,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/base_link.STL" />
+          filename="package://my_robot_description/meshes/base_link.STL" />
       </geometry>
     </collision>
   </link>
@@ -73,7 +73,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link1.STL" />
+          filename="package://my_robot_description/meshes/link1.STL" />
       </geometry>
       <material
         name="">
@@ -87,7 +87,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link1.STL" />
+          filename="package://my_robot_description/meshes/link1.STL" />
       </geometry>
     </collision>
   </link>
@@ -131,7 +131,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link2.STL" />
+          filename="package://my_robot_description/meshes/link2.STL" />
       </geometry>
       <material
         name="">
@@ -145,7 +145,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link2.STL" />
+          filename="package://my_robot_description/meshes/link2.STL" />
       </geometry>
     </collision>
   </link>
@@ -190,7 +190,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link3.STL" />
+          filename="package://my_robot_description/meshes/link3.STL" />
       </geometry>
       <material
         name="">
@@ -204,7 +204,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link3.STL" />
+          filename="package://my_robot_description/meshes/link3.STL" />
       </geometry>
     </collision>
   </link>
@@ -249,7 +249,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link4.STL" />
+          filename="package://my_robot_description/meshes/link4.STL" />
       </geometry>
       <material
         name="">
@@ -263,7 +263,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link4.STL" />
+          filename="package://my_robot_description/meshes/link4.STL" />
       </geometry>
     </collision>
   </link>
@@ -307,7 +307,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link5.STL" />
+          filename="package://my_robot_description/meshes/link5.STL" />
       </geometry>
       <material
         name="">
@@ -321,7 +321,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link5.STL" />
+          filename="package://my_robot_description/meshes/link5.STL" />
       </geometry>
     </collision>
   </link>
@@ -365,7 +365,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link6.STL" />
+          filename="package://my_robot_description/meshes/link6.STL" />
       </geometry>
       <material
         name="">
@@ -379,7 +379,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link6.STL" />
+          filename="package://my_robot_description/meshes/link6.STL" />
       </geometry>
     </collision>
   </link>
@@ -423,7 +423,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/gripper_base.STL" />
+          filename="package://my_robot_description/meshes/gripper_base.STL" />
       </geometry>
       <material
         name="">
@@ -437,7 +437,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/gripper_base.STL" />
+          filename="package://my_robot_description/meshes/gripper_base.STL" />
       </geometry>
     </collision>
   </link> 
@@ -474,7 +474,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link7.STL" />
+          filename="package://my_robot_description/meshes/link7.STL" />
       </geometry>
       <material
         name="">
@@ -488,7 +488,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link7.STL" />
+          filename="package://my_robot_description/meshes/link7.STL" />
       </geometry>
     </collision>
   </link>
@@ -532,7 +532,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link8.STL" />
+          filename="package://my_robot_description/meshes/link8.STL" />
       </geometry>
       <material
         name="">
@@ -546,7 +546,7 @@
         rpy="0 0 0" />
       <geometry>
         <mesh
-          filename="package://demo_robot_pkg/meshes/link8.STL" />
+          filename="package://my_robot_description/meshes/link8.STL" />
       </geometry>
     </collision>
   </link>
@@ -578,13 +578,13 @@
       <visual>
         <origin rpy="-1.57 0 1.57" xyz="0 0 0"/>
         <geometry>
-          <mesh filename="package://demo_robot_pkg/meshes/dae/realsense_mid_stand.dae"/>
+          <mesh filename="package://my_robot_description/meshes/dae/realsense_mid_stand.dae"/>
         </geometry>
       </visual>
       <collision>
         <origin rpy="-1.57 0 1.57" xyz="0 0 0"/>
         <geometry>
-          <mesh filename="package://demo_robot_pkg/meshes/dae/realsense_mid_stand.dae"/>
+          <mesh filename="package://my_robot_description/meshes/dae/realsense_mid_stand.dae"/>
         </geometry>
       </collision>
     </link>
@@ -613,13 +613,13 @@
       <visual>
         <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0.0043 -0.0175 0"/>
         <geometry>
-          <mesh filename="package://demo_robot_pkg/meshes/dae/d435.dae" />
+          <mesh filename="package://my_robot_description/meshes/dae/d435.dae" />
         </geometry>
       </visual>
       <collision>
         <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0.0043 -0.0175 0"/>
         <geometry>
-          <mesh filename="package://demo_robot_pkg/meshes/dae/d435.dae" />
+          <mesh filename="package://my_robot_description/meshes/dae/d435.dae" />
         </geometry>
       </collision>
       <inertial>

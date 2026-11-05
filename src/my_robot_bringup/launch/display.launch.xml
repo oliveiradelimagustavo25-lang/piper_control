@@ -4,7 +4,7 @@
 
     <arg 
         name="robot_model"
-        default="$(find-pkg-share demo_robot_pkg)/urdf/piper_description.xacro"
+        default="$(find-pkg-share my_robot_description)/urdf/piper_description.xacro"
         description="机器人模型路径"/>
 
     <arg 

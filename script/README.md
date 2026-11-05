@@ -1,8 +1,21 @@
 # 运行入口
 
-本目录集中保存手写 `.sh`。Shell 只加载环境、定位工作区和传递参数；运行流程放在 `test/` 的 Python 模块中。
+本目录集中保存手写 `.sh`：一键脚本启动仿真和任务，物理验收流程由 `test/` 中的 Python 模块负责。
 
-## 三色分拣
+## 直接启动并发送三色任务
+
+```bash
+./script/pick_three_colors.sh
+./script/pick_three_colors.sh gui:=false use_rviz:=false show_window:=false
+```
+
+脚本加载 `/opt/ros/humble` 和 工作区 `install/setup.bash`，使用 [gazebo_launch.yaml](../config/gazebo_launch.yaml) 启动总入口。脚本先确认 ROS 域没有现有节点，然后等待控制器和命名姿态接口，移动到 `pose_1`；随后读取节点实际的 Action 名称并发送分拣任务。分拣策略和颜色顺序由规划器 YAML 决定，每次抓取前规划器仍会进入观察位。脚本检查 Action 状态和 `success`，任务成功后保留仿真，按 Ctrl+C 退出。
+
+`--headless` 隐藏 Gazebo 和 RViz，`--no-debug-window` 隐藏颜色窗口，`--config FILE` 及 `--planner-config FILE` 可指定配置；`--help` 显示完整用法。`--` 后可传入 launch 参数，也支持直接传入 `gui:=false` 等参数。环境变量 `ROS_DOMAIN_ID`、`ROS_LOCALHOST_ONLY` 默认分别为 227、1；Action 名称通过 launch 参数或 YAML 设置。无显示服务时相机仍需虚拟显示，例如 `xvfb-run -a ./script/pick_three_colors.sh --headless --no-debug-window`。
+
+Gazebo 服务端默认使用 `http://127.0.0.1:11345`，它与 ROS 域编号是两个独立设置。端口已有服务时，启动会提前报错；使用 `ss -ltnp` 检查占用，确认后停止对应的旧仿真，或为新仿真设置独立 `GAZEBO_MASTER_URI`。
+
+## 三色物理验收
 
 先按[项目 README](../README.md) 安装依赖并完成 `colcon build`，从工作区运行：
 
@@ -36,8 +49,17 @@ ros2 node list --no-daemon
 
 ## 场景与验收范围
 
-一键回归使用的三色物块为 1 cm，初始 x=0.30 m、红/绿/蓝 y=-0.06/0/0.06 m；目标中心 x=0.26 m、y 不变、z=0.005 m。这与手动 launch 的默认场景不同。
+一键回归使用的三色物块为 1 cm，初始 x=0.30 m、红/绿/蓝 y=-0.06/0/0.06 m；目标中心 x=0.26 m、y 不变、z=0.005 m，与手动 launch 当前的默认位置一致。
 
 验收同时检查 Action 成功、物块抬升超过 4 cm、最终位置误差小于 2 cm。位置取自 Gazebo 状态服务，不代表业务节点已实现抓后视觉复核，也不代表实机精度。
 
 原 `test/run_sorting.sh` 已迁移到这里；测试阶段和临时 Python 脚本的复用方法见 [`test/README.md`](../test/README.md)。ArUco 运行入口不在本次目标一的范围内。
+
+## 清理残留进程
+
+```bash
+./script/clear.sh --dry-run  # 先查看候选进程
+./script/clear.sh            # 尝试停止这些残留进程
+```
+
+清理范围与 MuJoCo 分支一致：当前用户、工作目录在本项目内、启动父进程已经退出且被系统接管的已知节点；Gazebo 分支额外识别 `gzserver`、`gzclient` 和物块生成进程。仍由正常启动器管理的进程不会被当作残留处理。工作区外或仍在运行的其他 Gazebo 实例需要确认后自行停止，脚本不会按进程名全局清理。

@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<robot name="gazebo_ros_control">
-        <gazebo> 
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+    <xacro:macro name="piper_ros_control" params="controllers_file">
+        <gazebo>
             <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
-                <parameters>$(find demo_robot_pkg)/config/ros2_controllers.yaml</parameters> 
+                <parameters>${controllers_file}</parameters>
             </plugin>
         </gazebo>
 
@@ -47,7 +48,7 @@
                   <param name="initial_value">0.0</param>
                 </state_interface>
                 <state_interface name="velocity"/>
-            </joint> 
+            </joint>
             <joint name="joint2">
                 <command_interface name="velocity"/>
                 <state_interface name="position">
@@ -84,6 +85,7 @@
                 <state_interface name="velocity"/>
             </joint>
         </ros2_control>
-    
 
+
+    </xacro:macro>
 </robot>

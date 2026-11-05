@@ -11,11 +11,11 @@ task_planner:
     tool_to_tcp: [0.0, 0.0, 0.132]   # 与 manipulation.yaml 的 TCP 标定一致
 
     default_strategy: color_order
-    default_color_order: [1, 2, 3]   # 红、绿、蓝
+    default_color_order: [3, 1, 2]   # 1=红、2=绿、3=蓝；当前顺序为蓝、红、绿
     max_observation_age: 2.0         # s，拒绝过期观测
     observation_timeout: 5.0         # s，等待目标/TF/执行服务的最长时间
 
     # 物体中心的放置位置，使用 reference_frame，m；当前为 1 cm 地面物块。
-    red.place_position: [0.26, -0.04, 0.005]
+    red.place_position: [0.26, -0.06, 0.005]
     green.place_position: [0.26, 0.0, 0.005]
-    blue.place_position: [0.26, 0.04, 0.005]
+    blue.place_position: [0.26, 0.06, 0.005]

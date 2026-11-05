@@ -28,7 +28,7 @@ def spawn_cube(session):
     assert session.until(session.spawn_client.service_is_ready, 10), 'Spawn service unavailable'
     request = SpawnEntity.Request()
     request.name = 'validation_cube'
-    cube = ET.parse(ROOT / 'src/my_robot_model/blue_cube/model.sdf')
+    cube = ET.parse(ROOT / 'src/my_robot_world/objects/blue_cube/model.sdf')
     size = session.args.cube_size
     mass = session.args.cube_mass if session.args.cube_mass is not None else 0.001 * (size / 0.01)**3
     for box in cube.getroot().findall('.//box/size'):

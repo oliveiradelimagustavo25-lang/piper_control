@@ -12,7 +12,7 @@ from test.support.runtime import ROOT
 
 def prepare_executor(args, out):
     """保留原执行器测试的物理配置与诊断参数。"""
-    world = ET.parse(ROOT / 'src/demo_robot_pkg/world/room.world')
+    world = ET.parse(ROOT / 'src/my_robot_world/basic/preview.world')
     # 抓取测试使用近景，方便 GUI 中观察指尖和物块。
     world.getroot().find('world/gui/camera/pose').text = '0.60 -0.40 0.24 0 0.33 2.275'
     plugin = ET.SubElement(world.getroot().find('world'), 'plugin',
@@ -46,7 +46,7 @@ def prepare_executor(args, out):
     (out / 'manipulation.yaml').write_text(yaml.safe_dump(config))
 
     # 摩擦参数只应用于展开后的测试模型，保持源 URDF 不变。
-    model = ROOT / 'src/demo_robot_pkg/urdf/gazebo_piper_description.xacro'
+    model = ROOT / 'src/my_robot_description/urdf/piper_control.urdf.xacro'
     robot_xml = subprocess.check_output(['xacro', str(model)], text=True, timeout=30)
     robot = ET.fromstring(robot_xml)
     controller_params = robot.find("gazebo/plugin[@name='gazebo_ros2_control']/parameters")
@@ -77,7 +77,7 @@ def prepare_sorting(output):
     for color, y in [('red', -0.06), ('green', 0.0), ('blue', 0.06)]:
         config['task_planner']['ros__parameters'][color + '.place_position'] = [0.26, y, 0.005]
     (output / 'task_planner.yaml').write_text(yaml.safe_dump(config))
-    world = ET.parse(ROOT / 'src/demo_robot_pkg/world/room.world')
+    world = ET.parse(ROOT / 'src/my_robot_world/basic/preview.world')
     world.getroot().find('world/gui/camera/pose').text = '0.60 -0.40 0.30 0 0.40 2.275'
     plugin = ET.SubElement(world.getroot().find('world'), 'plugin',
                            name='sorting_state', filename='libgazebo_ros_state.so')

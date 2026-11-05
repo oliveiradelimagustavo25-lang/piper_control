@@ -72,7 +72,7 @@ class SortingCheck:
 
     def spawn_objects(self, processes, domain):
         process = processes.start([
-            'ros2', 'launch', 'my_robot_sim', 'spawn_sorting.launch.py',
+            'ros2', 'launch', 'my_robot_world', 'spawn_cube.launch.py',
             f'ros_domain_id:={domain}', 'x:=0.30', 'z:=0.006',
             'red_y:=-0.06', 'green_y:=0.0', 'blue_y:=0.06'], 'spawn')
         self.wait.require(lambda: process.poll() is not None, 60, '物块生成超时')

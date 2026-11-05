@@ -8,16 +8,16 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    model_path = get_package_share_directory('my_robot_model')
+    model_path = os.path.join(get_package_share_directory('my_robot_world'), 'objects')
     model = LaunchConfiguration('model')
 
     arguments = [
-        DeclareLaunchArgument('ros_domain_id', default_value='95'),
+        DeclareLaunchArgument('ros_domain_id', default_value='227'),
         DeclareLaunchArgument('localhost_only', default_value='1'),
         DeclareLaunchArgument(
             'model', default_value='blue_cube',
             choices=['blue_cube', 'green_cube', 'red_cube', 'aruco_model'],
-            description='my_robot_model 下的模型目录名。'),
+            description='my_robot_world 下的模型目录名。'),
         DeclareLaunchArgument(
             'entity', default_value=model,
             description='Gazebo 实例名；重复插入同一模型时需使用不同名称。'),

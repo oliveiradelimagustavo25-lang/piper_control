@@ -13,12 +13,15 @@ source install/setup.bash
 
 Python 测试不需要随 `colcon` 安装，修改后直接运行；C++ 或 ROS 配置变更仍需重新构建。`COLCON_IGNORE` 防止 `colcon` 把本目录内的独立 C++ 探针当成工作区包。
 
-入口的 `--help` 不加载 ROS 类型支持，可在尚未加载工作区时查看。
+`planner_check.py`、`executor_check.py` 和 `sorting_run.py` 的 `--help` 不加载 ROS 类型支持。
 
 ## 目录职责
 
 | 路径 | 内容 |
 | --- | --- |
+| `robot_description.py` | RViz 中查看机器人及关节滑块 |
+| `gazebo_world.py` | 只显示 Gazebo 世界和三个物块 |
+| `robot_control.py` | 机器人、Gazebo 控制器与 MoveIt，不生成物块 |
 | `planner_check.py` | 任务/深度感知总入口，可选择阶段或单个用例 |
 | `executor_check.py` | Gazebo 执行器总入口，可选择独立阶段 |
 | `sorting_run.py` | 完整三色分拣入口，由 `script/run_sorting.sh` 调用 |
