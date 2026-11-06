@@ -16,6 +16,6 @@ task_planner:
     observation_timeout: 5.0         # s，等待目标/TF/执行服务的最长时间
 
     # 物体中心的放置位置，使用 reference_frame，m；当前为 1 cm 地面物块。
-    red.place_position: [0.26, -0.04, 0.005]
+    red.place_position: [0.26, -0.06, 0.005]
     green.place_position: [0.26, 0.0, 0.005]
-    blue.place_position: [0.26, 0.04, 0.005]
+    blue.place_position: [0.26, 0.06, 0.005]

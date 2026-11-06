@@ -6,6 +6,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 ros_domain=${ROS_DOMAIN_ID:-227}
 headless=''
 show_window=''
+with_rviz=''
 launch_config="$root/config/mujoco_launch.yaml"
 planner_config=''
 
@@ -16,6 +17,7 @@ usage() {
   --ros-domain-id N       ROS 域（默认继承环境，否则使用 227）
   --headless              隐藏 MuJoCo 窗口
   --no-debug-window       隐藏颜色调试窗口
+  --rviz                  打开 MoveIt RViz（默认由总配置决定）
   --config FILE           总启动配置（默认 config/mujoco_launch.yaml）
   --planner-config FILE   任务规划器配置文件
   -h, --help              显示帮助
@@ -37,6 +39,7 @@ while (( $# )); do
             shift 2 ;;
         --headless) headless=true; shift ;;
         --no-debug-window) show_window=false; shift ;;
+        --rviz) with_rviz=true; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         *) echo "未知选项: $1" >&2; usage; exit 2 ;;
@@ -59,10 +62,12 @@ fi
 args=("launch_config:=$launch_config")
 if [[ -n $headless ]]; then args+=("headless:=$headless"); fi
 if [[ -n $show_window ]]; then args+=("show_window:=$show_window"); fi
+if [[ -n $with_rviz ]]; then args+=("with_rviz:=$with_rviz"); fi
 if [[ -n $planner_config ]]; then args+=("planner_config:=$planner_config"); fi
 printf 'ROS 域: %s；总配置: %s\n' "$ROS_DOMAIN_ID" "$launch_config"
 if [[ -n $headless ]]; then printf '命令行覆盖 headless: %s\n' "$headless"; fi
 if [[ -n $show_window ]]; then printf '命令行覆盖 show_window: %s\n' "$show_window"; fi
+if [[ -n $with_rviz ]]; then printf '命令行覆盖 with_rviz: %s\n' "$with_rviz"; fi
 if [[ -n $planner_config ]]; then printf '规划器配置: %s\n' "$planner_config"; fi
 if (( $# )); then printf '额外启动参数:'; printf ' %q' "$@"; printf '\n'; fi
 # 将 launch 和动作客户端放入独立进程组，只清理由本脚本启动的进程。

@@ -77,7 +77,7 @@ ros2 launch my_robot_bringup mujoco.launch.py --show-args
 
 执行端和任务规划器共享 `pick_place_action`、`move_to_named_action`；`sort_action` 指分拣 Action。旧 `action_name` 是 `pick_place_action` 的兼容别名，同时传入且不一致时会报错。`objects_topic` 同时配置深度定位输出和任务规划输入；关闭感知层时，未显式指定它则使用规划器 YAML 中的输入话题。RGB、深度及 CameraInfo 话题同时用于相机和感知节点。留空时使用对应 YAML；执行和规划节点的坐标系、末端链接与 TCP 从执行配置统一传入。`observation_target` 可覆盖规划器观察姿态。
 
-`image_topic`、`depth_topic`、`camera_info_topic`、`labels_topic`、`debug_topic`、`points_topic`、`objects_topic`、`show_window` 和 `publish_debug` 可直接覆盖感知配置。运动常用覆盖包括 `arm_group`、`gripper_group`、`reference_frame`、`end_effector_link`、`velocity_scaling`、`acceleration_scaling`、`planning_time` 和 `cartesian_step`；详细颜色阈值、抓取距离与放置位置仍在对应 YAML。
+`image_topic`、`depth_topic`、`camera_info_topic`、`labels_topic`、`debug_topic`、`points_topic`、`objects_topic`、`show_window` 和 `publish_debug` 可直接覆盖感知配置。总入口的 `with_rviz:=true` 可随系统启动 MoveIt RViz，默认关闭并依赖 `with_moveit:=true`。运动常用覆盖包括 `arm_group`、`gripper_group`、`reference_frame`、`end_effector_link`、`velocity_scaling`、`acceleration_scaling`、`planning_time` 和 `cartesian_step`；详细颜色阈值、抓取距离与放置位置仍在对应 YAML。
 
 ```bash
 # 完整世界及 MoveIt，不启动后两层
@@ -135,4 +135,4 @@ MoveIt RViz 可在相同域单独启动：
 ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
 ```
 
-MuJoCo 物块尚未自动同步为 MoveIt 碰撞物体，任务运动完成不代表最终放置位置已核验。现有环境中部分 C++ 进程退出时仍可能出现析构异常，需结合子进程日志检查。
+执行器在命名姿态和抓放动作前，将最新视觉观测同步为 MoveIt 碰撞盒；碰撞场景不是对 MuJoCo 世界的实时镜像。任务运动完成不代表物理夹取和最终放置位置已核验。现有环境中部分 C++ 进程退出时仍可能出现析构异常，需结合子进程日志检查。

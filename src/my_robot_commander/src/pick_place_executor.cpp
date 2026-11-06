@@ -3,6 +3,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -11,8 +12,10 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <my_robot_interface/action/pick_place.hpp>
 #include <my_robot_interface/action/move_to_named.hpp>
+#include <my_robot_interface/msg/detected_object_array.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Matrix3x3.hpp>
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -20,6 +23,7 @@
 #include <tf2_ros/transform_listener.h>
 
 #include "my_robot_commander/motion_controller.hpp"
+#include "my_robot_commander/pick_place_scene.hpp"
 
 namespace
 {
@@ -74,6 +78,7 @@ class PickPlaceExecutor
   using NamedAction = my_robot_interface::action::MoveToNamed;
   using NamedHandle = rclcpp_action::ServerGoalHandle<NamedAction>;
   using Motion = my_robot_commander::MotionController;
+  using Scene = my_robot_commander::PickPlaceScene;
 
 public:
   explicit PickPlaceExecutor(const rclcpp::Node::SharedPtr & node)
@@ -109,12 +114,19 @@ public:
       throw std::invalid_argument("Invalid gripper configuration or approach/lift/retreat distances");
     }
     motion_ = std::make_unique<Motion>(node_, options);
+    scene_ = std::make_unique<Scene>(node_, tf_buffer_, frame_, options.end_effector_link);
+    objects_sub_ = node_->create_subscription<my_robot_interface::msg::DetectedObjectArray>(
+      parameter<std::string>(node_, "objects_topic", "/perception/objects"), 10,
+      [this](my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr msg) {
+        std::lock_guard<std::mutex> lock(observations_mutex_);
+        observations_ = msg;
+      });
 
     const auto name = parameter<std::string>(node_, "action_name", "/manipulation/pick_place");
     server_ = rclcpp_action::create_server<Action>(node_, name,
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Action::Goal> goal) {
-        if (!validGoal(*goal) || busy_.exchange(true)) {
-          RCLCPP_WARN(node_->get_logger(), "Rejected invalid goal or executor is busy");
+        if (!validGoal(*goal) || holding_ || busy_.exchange(true)) {
+          RCLCPP_WARN(node_->get_logger(), "Rejected invalid/busy goal or object still held");
           return rclcpp_action::GoalResponse::REJECT;
         }
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
@@ -143,6 +155,31 @@ public:
         if (worker_.joinable()) { worker_.join(); }
         worker_ = std::thread([this, handle]() { executeNamed(handle); });
       });
+
+    // If an action stops with a carried object, release it explicitly after recovery.
+    recovery_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    release_service_ = node_->create_service<std_srvs::srv::Trigger>(
+      "/manipulation/release_held_object",
+      [this](std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        if (busy_.exchange(true)) {
+          response->message = "Executor is busy";
+          return;
+        }
+        try {
+          std::vector<double> joints;
+          for (const auto sign : signs_) {joints.push_back(sign * open_width_ / 2.0);}
+          if (!motion_->moveGripperToJoints(joints)) {throw std::runtime_error("Opening gripper failed");}
+          if (scene_->holding()) {scene_->release();}
+          holding_ = false;
+          scene_->restoreTouch();
+          response->success = true;
+          response->message = "Gripper opened; planning-scene attachment released";
+        } catch (const std::exception & error) {
+          response->message = error.what();
+        }
+        busy_ = false;
+      }, rmw_qos_profile_services_default, recovery_group_);
   }
 
   ~PickPlaceExecutor()
@@ -153,10 +190,22 @@ public:
   }
 
 private:
+  // Cache perception callbacks; apply a consistent snapshot before each motion.
+  void syncScene()
+  {
+    my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr observations;
+    {
+      std::lock_guard<std::mutex> lock(observations_mutex_);
+      observations = observations_;
+    }
+    scene_->sync(observations);
+  }
+
   void executeNamed(const std::shared_ptr<NamedHandle> & handle)
   {
     auto result = std::make_shared<NamedAction::Result>();
     try {
+      syncScene();
       if (!handle->is_canceling()) {
         result->success = motion_->moveToNamedTarget(handle->get_goal()->target);
       }
@@ -272,11 +321,19 @@ private:
       const tf2::Vector3 lifted(pick.x(), pick.y(), safe_z);
       const tf2::Vector3 pre_place(put.x(), put.y(), safe_z);
 
+      syncScene();
+      scene_->prepare(goal->object_id, object, goal->object_dimensions);
+
       stage(Action::Feedback::PICKING, "Opening, approaching and gripping " + goal->object_id);
       step("Open gripper", [&]() { return grip(open_width_); });
       step("Move to pre-grasp", [&]() { return move(pre_pick, false); });
       step("Descend to grasp", [&]() { return move(pick, true); });
-      step("Close gripper", [&]() { return grip(std::max(0.0, width - compression_)); });
+      step("Close gripper", [&]() {
+        // The MoveIt attachment is a planning model, not proof of a physical grasp.
+        scene_->attach();
+        holding_ = true;
+        return grip(std::max(0.0, width - compression_));
+      });
 
       stage(Action::Feedback::TRANSFERRING, "Lifting and transferring");
       step("Lift object", [&]() { return move(lifted, true); });
@@ -284,13 +341,24 @@ private:
 
       stage(Action::Feedback::PLACING, "Lowering, releasing and retreating");
       step("Descend to place", [&]() { return move(put, true); });
-      step("Release object", [&]() { return grip(open_width_); });
+      step("Release object", [&]() {
+        if (!grip(open_width_)) {return false;}
+        scene_->release();
+        holding_ = false;
+        return true;
+      });
       step("Retreat", [&]() { return move(put + tf2::Vector3(0, 0, retreat_), true); });
       result->success = true;
       result->message = "Motion sequence completed; object placement needs visual verification";
     } catch (const std::exception & error) {
       result->message = error.what();
       RCLCPP_WARN(node_->get_logger(), "%s", error.what());
+    }
+    try {
+      scene_->restoreTouch();
+    } catch (const std::exception & error) {
+      result->success = false;
+      result->message += "; restoring collision checks failed: " + std::string(error.what());
     }
     if (rclcpp::ok()) {
       if (handle->is_canceling()) {
@@ -310,10 +378,17 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   std::unique_ptr<Motion> motion_;
+  std::unique_ptr<Scene> scene_;
+  std::mutex observations_mutex_;
+  my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr observations_;
+  rclcpp::Subscription<my_robot_interface::msg::DetectedObjectArray>::SharedPtr objects_sub_;
+  rclcpp::CallbackGroup::SharedPtr recovery_group_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_service_;
   rclcpp_action::Server<Action>::SharedPtr server_;
   rclcpp_action::Server<NamedAction>::SharedPtr named_server_;
   std::thread worker_;
   std::atomic<bool> busy_{false};
+  std::atomic<bool> holding_{false};
   std::string frame_;
   tf2::Vector3 tool_to_tcp_, offset_;
   tf2::Quaternion tool_rotation_;

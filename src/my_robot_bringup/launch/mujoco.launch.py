@@ -50,7 +50,7 @@ CONFIG_PATHS = {
     'moveit_controllers_file', 'manipulation_config', 'planner_config', 'perception_config',
 }
 CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATHS | {
-    'headless', 'with_moveit', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
+    'headless', 'with_moveit', 'with_rviz', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
     'sim_speed_factor', 'planning_pipeline', 'pick_place_action', 'sort_action', 'observation_target',
 }
 
@@ -136,6 +136,15 @@ def perception_layer(bringup, argument):
     return include_layer(bringup, 'perception.launch.py', arguments)
 
 
+def rviz_layer():
+    """Reuse the MoveIt RViz launch and the simulation clock."""
+    moveit = Path(get_package_share_directory('my_robot_moveit_pkg'))
+    return IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(str(moveit / 'launch' / 'moveit_rviz.launch.py')),
+        launch_arguments={'use_sim_time': 'true'}.items(),
+    )
+
+
 def launch_setup(context):
     """Validate and assemble the three launch layers."""
     def argument(name):
@@ -146,10 +155,13 @@ def launch_setup(context):
         load_launch_config(str(Path(config_file).expanduser().resolve()))
 
     with_moveit = IfCondition(LaunchConfiguration('with_moveit')).evaluate(context)
+    with_rviz = IfCondition(LaunchConfiguration('with_rviz')).evaluate(context)
     with_motion = IfCondition(LaunchConfiguration('with_motion')).evaluate(context)
     with_perception = IfCondition(LaunchConfiguration('with_perception')).evaluate(context)
     if with_motion and not with_moveit:
         raise ValueError('with_motion:=true requires with_moveit:=true')
+    if with_rviz and not with_moveit:
+        raise ValueError('with_rviz:=true requires with_moveit:=true')
     if with_perception and not with_motion:
         raise ValueError('with_perception:=true requires with_motion:=true')
     bringup = Path(get_package_share_directory('my_robot_bringup'))
@@ -165,6 +177,8 @@ def launch_setup(context):
         layers.append(motion_layer(bringup, argument, objects_topic))
     if with_perception:
         layers.append(perception_layer(bringup, argument))
+    if with_rviz:
+        layers.append(rviz_layer())
     return layers
 
 
@@ -182,6 +196,8 @@ def generate_launch_description():
                               description='Run without the MuJoCo window'),
         config_argument('with_moveit', default_value='true', choices=['true', 'false'],
                               description='Start the MoveIt motion planning server'),
+        config_argument('with_rviz', default_value='false', choices=['true', 'false'],
+                              description='Start the MoveIt RViz window'),
         config_argument('with_executor', default_value=LaunchConfiguration('with_moveit'),
                               choices=['true', 'false'], description='Legacy default for with_motion'),
         config_argument('with_motion', default_value=LaunchConfiguration('with_executor'),

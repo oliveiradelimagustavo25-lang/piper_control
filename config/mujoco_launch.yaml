@@ -2,6 +2,7 @@
 # 只填写需要覆盖的参数；其余使用 launch 或节点 YAML 默认值。
 headless: false
 show_window: true
+with_rviz: false  # true：随主入口打开 MoveIt RViz
 sim_speed_factor: 1.0
 
 # 分层开关默认按依赖联动：MoveIt -> motion -> perception -> camera。

@@ -1,6 +1,6 @@
 # Piper MuJoCo 工作区
 
-本分支面向 Piper 机械臂的 MuJoCo 仿真。正式入口已组合机器人、地面、物块、标记板和相机，并提供 ros2_control、MoveIt、执行接口和颜色与深度感知；规划场景物体同步和最终分拣结果的自动验证尚未完成。
+本分支面向 Piper 机械臂的 MuJoCo 仿真。正式入口组合机器人、地面、物块、标记板和相机，并提供 ros2_control、MoveIt、抓放执行与颜色深度感知。执行器在运动前将视觉物块同步到 MoveIt 规划场景；最终物理抓取仍需独立验证。
 
 ## 当前结构
 
@@ -109,14 +109,34 @@ python3 test/probes/check_robot_control.py
 
 若 MuJoCo 或颜色调试窗口没有出现，先检查启动日志和同域 `/robot_description` 是否冲突；窗口参数及隔离 ROS 域的方法见 [bringup 故障排查](src/my_robot_bringup/README.md#窗口不显示时)。
 
-`robot_description.py --rviz` 打开的是静态预览及关节滑块，滑块不驱动 MuJoCo。要在正式仿真中使用 MoveIt 规划界面，保持 `mujoco.launch.py` 运行，并在相同 ROS 域的另一终端执行：
+`robot_description.py --rviz` 打开的是静态预览及关节滑块，滑块不驱动 MuJoCo。正式仿真可通过总配置的 `with_rviz: true` 打开 MoveIt RViz，也可通过命令行临时开启：
+
+```bash
+./script/pick_three_colors.sh --rviz
+# 或直接启动总入口
+ros2 launch my_robot_bringup mujoco.launch.py with_rviz:=true
+```
+
+`with_rviz` 默认 `false`，需要 `with_moveit:=true`。`headless` 只控制 MuJoCo 窗口，`show_window` 只控制颜色调试窗口。如果仿真已运行，也可以在相同 ROS 域的另一终端单独打开 MoveIt RViz：
 
 ```bash
 source install/setup.bash
 ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
 ```
 
-该 RViz 使用 `world` 固定坐标系，与 MoveIt 连接；其规划场景尚未自动同步 MuJoCo 物块。其他测试选项、相机渲染和安装路径说明见 [test/README.md](test/README.md)。
+该 RViz 使用 `world` 固定坐标系，与 MoveIt 连接。执行器在命名姿态或抓放动作开始前同步最近的视觉物块，RViz 的 MotionPlanning 可以查看相应碰撞盒；直接在 RViz 中规划不会触发执行器同步。其他测试选项、相机渲染和安装路径说明见 [test/README.md](test/README.md)。
+
+## 碰撞场景与抓放
+
+[manipulation.yaml](src/my_robot_commander/config/manipulation.yaml) 定义 MoveIt 地面、标记板碰撞盒、夹爪允许接触的连杆和抓取参数。默认盒体与 MuJoCo 场景中的地面和标记板对齐；视觉物块在动作前按检测到的位姿和尺寸同步。抓放时目标在 MoveIt 中附着到工具，释放后回到世界场景；恢复服务 `/manipulation/release_held_object` 用于处理取消或失败后仍保留的负载模型。
+
+规划场景与 MuJoCo 物理世界相互独立：MoveIt 中附着不代表实际夹住，自动 OctoMap 也没有启用。当前只在动作前更新视觉快照，不连续同步，暂时丢失或离开视野的旧物块不会自动删除。场景盒和抓取偏移适用于当前仿真，改变世界或接入实物前需重新核对。
+
+```bash
+python3 test/probes/check_planning_scene.py           # 地面、标记板、视觉盒与碰撞状态
+python3 test/probes/check_planning_scene.py --grasp   # 额外验证抓放附着、释放位置
+python3 test/probes/check_planning_scene.py --recovery # 取消后保留并显式释放
+```
 
 ## 三色抓放仿真
 
@@ -182,6 +202,6 @@ MoveIt 自动加载的 `kinematics.yaml`、`joint_limits.yaml` 等默认仍来�
 
 当前完整世界由原生控制插件统一推进，测试脚本不作为正式运行库。`motion_controller.cpp` 作为共享库由 `pick_place_executor` 使用，执行参数由 YAML 配置并允许 launch 覆盖。职责与接口修正见[完整世界启动报告](docs/2026-11-02_world_control_roles.md)。
 
-后续继续校准控制精度、同步 MuJoCo 物体到 MoveIt 规划场景，并完善感知识别和任务规划。当前环境的部分 C++ 节点在退出时仍有析构异常，详见本轮报告。
+后续继续校准控制精度、完善视觉物体的持续同步和抓后位置验证。当前环境的部分 C++ 节点在退出时仍有析构异常，详见本轮报告。
 
 正式测试和必要资源建议纳入 Git；临时测试放在 `test/local/`，构建产物和缓存已忽略。临时节点移除及当前执行入口见[开发报告](docs/2026-11-02_remove_temporary_commander.md)，MoveIt 和执行链整合见[整合报告](docs/2026-11-02_mujoco_moveit_execution.md)，此前控制链构建见[控制报告](docs/2026-11-02_mujoco_control.md)，此前世界构建过程见[构建报告](docs/2026-11-02_mujoco_world_construction.md)。

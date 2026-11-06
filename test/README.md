@@ -72,3 +72,15 @@ python3 test/probes/check_robot_control.py --viewer
 原自动轨迹测试迁移到此处：在默认 ROS 域 184 启动机器人本体，检查状态、时钟、三个控制器，并发送小幅机械臂和夹爪轨迹，完成后退出。可通过 `--ros-domain-id` 换域。当前验收容差为机械臂 0.08 rad、夹爪 0.004 m，不代表实机精度。
 
 每个阶段独立启动自己的仿真，测试结束后再运行其他阶段；避免相同 ROS 域的控制仿真互相干扰。`support/viewer.py` 只服务于前两个 Python 查看器，机器人控制窗口由原生插件负责。
+
+## MoveIt 规划场景与碰撞
+
+```bash
+python3 test/probes/check_planning_scene.py
+python3 test/probes/check_planning_scene.py --grasp
+python3 test/probes/check_planning_scene.py --recovery
+```
+
+探针默认使用独立 ROS 域 185，启动无窗口 MuJoCo 与 MoveIt。基础检查向感知话题发布合成物块，验证地面、标记板与物块碰撞盒、障碍加入和移除后的状态检测；`--grasp` 额外检查抓放期间附着及释放后的规划盒位置；`--recovery` 检查附着后取消、带载拒绝新抓放及显式释放。可用 `--ros-domain-id` 调整测试域、`--objects-topic` 测试自定义物体话题；若该域已发现其他节点，探针会退出。启动日志位于 `log/planning_scene/`。
+
+这些检查使用合成视觉观测，验证的是 MoveIt 规划场景，不单独证明 MuJoCo 物理抓取成功；完整相机和物理效果需要另行观察。

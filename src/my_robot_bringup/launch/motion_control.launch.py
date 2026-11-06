@@ -55,6 +55,9 @@ def launch_setup(context):
     named = argument('move_to_named_action') or execution.get('move_to_named_action', '/manipulation/move_to_named')
     execution.update(action_name=pick, move_to_named_action=named)
     planner.update(pick_place_action=pick, move_to_named_action=named, use_sim_time=True)
+    if argument('objects_topic'):
+        # Both the planner and the planning-scene snapshot use the same detections.
+        execution['objects_topic'] = argument('objects_topic')
     for source, target in (('sort_action', 'action_name'), ('objects_topic', 'objects_topic'),
                            ('observation_target', 'observation_target')):
         if argument(source):

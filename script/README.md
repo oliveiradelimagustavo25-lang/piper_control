@@ -31,6 +31,9 @@ ros2 action send_goal --feedback /sorting/sort_objects my_robot_interface/action
 # 隐藏 MuJoCo 和颜色调试窗口（相机仍需要 OpenGL 环境）
 ./script/pick_three_colors.sh --headless --no-debug-window
 
+# 随仿真一起打开 MoveIt RViz
+./script/pick_three_colors.sh --rviz
+
 ./script/pick_three_colors.sh --planner-config /path/to/task_planner.yaml
 
 # 选择另一份总配置；相对路径以该配置文件所在目录为基准
@@ -38,7 +41,7 @@ ros2 action send_goal --feedback /sorting/sort_objects my_robot_interface/action
 ./script/pick_three_colors.sh --help
 ```
 
-默认总配置保存在 [config/mujoco_launch.yaml](../config/mujoco_launch.yaml)，修改后重新运行脚本即可，不需要重新 `colcon build`。该文件中只写需要覆盖的 launch 参数；布尔值使用 `true` / `false`，路径相对于 YAML 自身所在目录。未知参数名会报错。`--headless`、`--no-debug-window`、`--planner-config` 和 `--` 后的同名参数会覆盖总配置。例如将总配置中的 `headless` 设为 `true` 后，可通过 `-- headless:=false` 临时打开窗口。
+默认总配置保存在 [config/mujoco_launch.yaml](../config/mujoco_launch.yaml)，修改后重新运行脚本即可，不需要重新 `colcon build`。其中 `with_rviz: true` 会启动 MoveIt RViz，默认 `false`；`--rviz` 可临时启用。该文件中只写需要覆盖的 launch 参数；布尔值使用 `true` / `false`，路径相对于 YAML 自身所在目录。未知参数名会报错。`--headless`、`--no-debug-window`、`--rviz`、`--planner-config` 和 `--` 后的同名参数会覆盖总配置。例如将总配置中的 `headless` 设为 `true` 后，可通过 `-- headless:=false` 临时打开窗口。
 
 默认总配置直接指向工作区的六份节点 YAML，修改它们并重启脚本也无需重新构建。MoveIt 自动读取的 `kinematics.yaml`、`joint_limits.yaml` 等未由总配置的路径参数覆盖，仍来自安装目录，修改源码后需要重新构建对应包（除非原先使用了适用的符号链接安装）。运行中的节点不会自动重新加载 YAML。
 
