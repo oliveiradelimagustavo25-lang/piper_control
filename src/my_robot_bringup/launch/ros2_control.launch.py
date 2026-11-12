@@ -86,10 +86,12 @@ def control_nodes(description, controllers, plugins_file):
              parameters=parameters, output='screen',
              remappings=[('~/robot_description', '/robot_description')], on_exit=Shutdown()),
     ]
-    for name in ('joint_state_broadcaster', 'arm_controller', 'gripper_controller'):
-        nodes.append(Node(package='controller_manager', executable='spawner', output='screen',
-                          arguments=[name, '--controller-manager', '/controller_manager',
-                                     '--param-file', controllers]))
+    # The installed spawner supports multiple controllers. One process avoids
+    # three simultaneous DDS participants and controller-manager startup races.
+    nodes.append(Node(package='controller_manager', executable='spawner', output='screen',
+                      arguments=['joint_state_broadcaster', 'arm_controller', 'gripper_controller',
+                                 '--controller-manager', '/controller_manager',
+                                 '--param-file', controllers]))
     return nodes
 
 

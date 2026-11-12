@@ -5,6 +5,28 @@ show_window: true
 with_rviz: false  # true：随主入口打开 MoveIt RViz
 sim_speed_factor: 1.0
 
+# 场景只在这一份总配置中设置，无需生成或指定 XML。
+# 每个 [x, y, z] 对应一个 1 cm 物块（m，世界坐标）；[] 表示不生成该颜色。
+# scenes 不填写、{} 或 null 均保留原有默认三色；未填写的颜色沿用默认一个。
+# scenes: {}
+# 例如：两个红色、一个绿色、没有蓝色（直接替换上面的 scenes: {}）：
+scenes:
+   red: [[0.32, -0.12, 0.03], [0.32, -0.04, 0.03]]
+   green: [[0.32, 0.04, 0.03]]
+   blue: []
+
+# 按 X/Y/Z 逐轴选择 relative（相对物体首次派发中心）或 absolute（reference_frame 绝对中心）。
+# 显式配置覆盖 planner YAML 的放置点/区域；删除这两项才沿用旧区域策略。
+place_position_modes: [relative, relative, relative]
+place_positions:
+  red: [-0.050, -0.010, 0.0005]
+  green: [-0.050, -0.010, 0.0005]
+  blue: [-0.050, -0.010, 0.0005]
+# 混合示例（非当前值）：modes=[relative, absolute, absolute]，red=[-0.24,-0.06,-0.12]
+# 目标 = [红块首次派发 x - 0.24, -0.06, -0.12]。全 absolute 即绝对放置点。
+# Z 为物体中心或中心偏移，不是桌面/TCP；桌面 -0.145、块高 0.05 时中心为 -0.120 m。
+# 三个颜色数组必须完整且非 null；相对 dry-run 只显示规则，Planner 运行时打印绝对目标。
+
 # 分层开关默认按依赖联动：MoveIt -> motion -> perception -> camera。
 # with_moveit: true
 # with_motion: true

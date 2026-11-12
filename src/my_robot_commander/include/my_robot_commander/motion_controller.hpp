@@ -38,6 +38,7 @@ public:
   MotionController(const MotionController &) = delete;
   MotionController & operator=(const MotionController &) = delete;
 
+  bool canReachPose(const geometry_msgs::msg::PoseStamped & pose);  // IK 粗查，不保证路径可行。
   bool moveToNamedTarget(const std::string & name);
   bool moveToJoints(const std::vector<double> & joints);
   bool moveToPose(const geometry_msgs::msg::PoseStamped & pose, bool cartesian = false);

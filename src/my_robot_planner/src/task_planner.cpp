@@ -9,12 +9,13 @@
 #include <string>
 #include <vector>
 
-#include <my_robot_interface/action/pick_place.hpp>
 #include <my_robot_interface/action/move_to_named.hpp>
+#include <my_robot_interface/action/pick_place.hpp>
 #include <my_robot_interface/action/sort_objects.hpp>
 #include <my_robot_interface/msg/detected_object_array.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
@@ -29,10 +30,16 @@ class TaskPlanner : public rclcpp::Node
   using Named = my_robot_interface::action::MoveToNamed;
   using Object = my_robot_interface::msg::DetectedObject;
   using Objects = my_robot_interface::msg::DetectedObjectArray;
+  using Trigger = std_srvs::srv::Trigger;
   using SortHandle = rclcpp_action::ServerGoalHandle<Sort>;
   using PickHandle = rclcpp_action::ClientGoalHandle<Pick>;
   using NamedHandle = rclcpp_action::ClientGoalHandle<Named>;
-  enum class Phase {WAITING, SENDING, EXECUTING, OBSERVING};
+  using Clock = std::chrono::steady_clock;
+  using Slot = std::pair<uint8_t, size_t>;
+  enum class Phase {WAITING, OBSERVING, SENDING, EXECUTING, RECOVERING};
+  enum class RuleState {READY, RESERVED, PLACED, UNREACHABLE};
+  struct RuleTarget {uint8_t color; tf2::Vector3 goal; RuleState state = RuleState::READY;};
+  struct Attempt {int count = 0; rclcpp::Time retry_after{0, 0, RCL_ROS_TIME};};
 
 public:
   TaskPlanner() : Node("task_planner"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
@@ -41,156 +48,247 @@ public:
     tool_frame_ = declare_parameter<std::string>("end_effector_frame", "link6");
     tool_to_tcp_ = xyz(declare_parameter<std::vector<double>>("tool_to_tcp", {0, 0, 0.132}));
     default_strategy_ = declare_parameter<std::string>("default_strategy", "color_order");
-    const auto order = declare_parameter<std::vector<int64_t>>("default_color_order", {1, 2, 3});
-    for (const auto color : order) {
-      if (color < 1 || color > 3) {
-        throw std::invalid_argument("default_color_order must contain colors 1/2/3");
-      }
+    for (const auto color : declare_parameter<std::vector<int64_t>>("default_color_order", {1, 2, 3})) {
+      if (color < 1 || color > 3) {throw std::invalid_argument("Colors must be 1/2/3");}
       default_order_.push_back(static_cast<uint8_t>(color));
     }
+    finish_mode_ = declare_parameter<std::string>("finish_mode", "batch");
+    retry_policy_ = declare_parameter<std::string>("retry_policy", "priority");
+    exhausted_policy_ = declare_parameter<std::string>("on_attempts_exhausted", "continue");
+    slots_full_policy_ = declare_parameter<std::string>("on_slots_full", "wait");
+    verification_ = declare_parameter<std::string>("placement_verification", "visual");
+    max_attempts_ = declare_parameter<int>("max_attempts", 3);
+    max_objects_ = declare_parameter<int>("max_objects", 0);
+    idle_timeout_ = declare_parameter<double>("idle_timeout", 3.0);
+    cooldown_ = declare_parameter<double>("retry_cooldown", 0.0);
+    verify_timeout_ = declare_parameter<double>("verification_timeout", 3.0);
+    slot_tolerance_ = declare_parameter<double>("slot_tolerance", 0.012);
+    slot_clearance_ = declare_parameter<double>("slot_clearance", 0.025);
     max_age_ = declare_parameter<double>("max_observation_age", 2.0);
     timeout_ = declare_parameter<double>("observation_timeout", 5.0);
+    action_timeout_ = declare_parameter<double>("action_timeout", 180.0);
+    recovery_timeout_ = declare_parameter<double>("recovery_timeout", 90.0);
     observation_target_ = declare_parameter<std::string>("observation_target", "pose_1");
     settle_time_ = declare_parameter<double>("observation_settle_time", 0.3);
-    places_[1] = xyz(declare_parameter<std::vector<double>>(
-        "red.place_position", {0.26, -0.04, 0.005}));
-    places_[2] = xyz(declare_parameter<std::vector<double>>(
-        "green.place_position", {0.26, 0.0, 0.005}));
-    places_[3] = xyz(declare_parameter<std::vector<double>>(
-        "blue.place_position", {0.26, 0.04, 0.005}));
-    if (!validPolicy(default_strategy_, default_order_) || frame_.empty() || tool_frame_.empty() ||
-      !std::isfinite(max_age_) || max_age_ <= 0 || !std::isfinite(timeout_) || timeout_ <= 0 ||
-      !std::isfinite(settle_time_) || settle_time_ < 0)
-    {
-      throw std::invalid_argument("Invalid task policy, frames or observation timeouts");
+    workspace_min_ = declare_parameter<std::vector<double>>("workspace_min", std::vector<double>{});
+    workspace_max_ = declare_parameter<std::vector<double>>("workspace_max", std::vector<double>{});
+    if (!workspace_min_.empty() || !workspace_max_.empty()) {
+      const auto lo = xyz(workspace_min_), hi = xyz(workspace_max_);
+      for (int i = 0; i < 3; ++i) {
+        if (lo[i] >= hi[i]) {throw std::invalid_argument("workspace_min must be below max");}
+      }
     }
-
+    position_modes_ = declare_parameter<std::vector<std::string>>(
+      "place_position_modes", {"absolute", "absolute", "absolute"});
+    if (position_modes_.size() != 3 || !std::all_of(position_modes_.begin(), position_modes_.end(),
+      [](const auto & mode) {return mode == "absolute" || mode == "relative";}))
+    {throw std::invalid_argument("place_position_modes requires X/Y/Z relative or absolute");}
+    const std::array<std::string, 4> color_names{"", "red", "green", "blue"};
+    std::array<std::vector<double>, 4> rules;
+    for (uint8_t c = 1; c <= 3; ++c) {
+      rules[c] = declare_parameter<std::vector<double>>("place_positions." + color_names[c], std::vector<double>{});
+      use_position_rules_ = use_position_rules_ || !rules[c].empty();
+    }
+    if (use_position_rules_) {
+      for (uint8_t c = 1; c <= 3; ++c) {position_values_[c] = xyz(rules[c]);}
+    } else if (std::find(position_modes_.begin(), position_modes_.end(), "relative") != position_modes_.end()) {
+      throw std::invalid_argument("Relative modes require all three explicit place_positions arrays");
+    }
+    const auto step = declare_parameter<std::vector<double>>("placement_step", {0.04, 0.06});
+    if (step.size() != 2 || !std::isfinite(step[0]) || !std::isfinite(step[1]) ||
+      step[0] <= 0 || step[1] <= 0)
+    {throw std::invalid_argument("placement_step requires positive finite x/y spacing");}
+    const std::array<std::string, 4> colors{"", "red", "green", "blue"};
+    for (uint8_t color = 1; color <= 3; ++color) {
+      const auto single = declare_parameter<std::vector<double>>(
+        colors[color] + ".place_position", {0.26, (static_cast<int>(color) - 2) * 0.06, 0.005});
+      auto values = declare_parameter<std::vector<double>>(colors[color] + ".place_slots", std::vector<double>{});
+      const auto region = declare_parameter<std::vector<double>>(
+        colors[color] + ".place_region", std::vector<double>{});
+      if (use_position_rules_) {continue;}  // 显式规则覆盖旧区域与槽位，不混用。
+      if (values.empty() && !region.empty()) {
+        // 区域和间距定义容量，与当前场景的颜色数量无关。显式 slots 仍兼容旧配置。
+        if (region.size() != 5 || !std::all_of(region.begin(), region.end(),
+          [](double v) {return std::isfinite(v);}) || region[0] > region[2] || region[1] > region[3])
+        {throw std::invalid_argument("place_region requires [xmin, ymin, xmax, ymax, z]");}
+        const auto origin = xyz(single);
+        const int xmin = static_cast<int>(std::ceil((region[0] - origin.x()) / step[0] - 1e-9));
+        const int xmax = static_cast<int>(std::floor((region[2] - origin.x()) / step[0] + 1e-9));
+        const int ymin = static_cast<int>(std::ceil((region[1] - origin.y()) / step[1] - 1e-9));
+        const int ymax = static_cast<int>(std::floor((region[3] - origin.y()) / step[1] + 1e-9));
+        std::vector<tf2::Vector3> points;
+        for (int y = ymin; y <= ymax; ++y) {
+          for (int x = xmin; x <= xmax; ++x) {
+            points.emplace_back(origin.x() + x * step[0], origin.y() + y * step[1], region[4]);
+          }
+        }
+        std::stable_sort(points.begin(), points.end(), [&](const auto & a, const auto & b) {
+          return (a - origin).length2() < (b - origin).length2();
+        });
+        for (const auto & point : points) {
+          values.insert(values.end(), {point.x(), point.y(), point.z()});
+        }
+        if (values.empty()) {throw std::invalid_argument("Placement region contains no lattice point");}
+        set_parameter(rclcpp::Parameter(colors[color] + ".place_slots", values));
+      }
+      if (values.empty()) {values = single;}
+      if (values.empty() || values.size() % 3 != 0) {
+        throw std::invalid_argument("place_slots requires xyz triples");
+      }
+      for (size_t i = 0; i < values.size(); i += 3) {
+        slots_[color].push_back(xyz({values[i], values[i + 1], values[i + 2]}));
+      }
+    }
+    if (!validPolicy(default_strategy_, default_order_) || frame_.empty() || tool_frame_.empty() ||
+      (finish_mode_ != "batch" && finish_mode_ != "watch") ||
+      (retry_policy_ != "priority" && retry_policy_ != "immediate" && retry_policy_ != "disabled") ||
+      (exhausted_policy_ != "continue" && exhausted_policy_ != "stop") ||
+      (slots_full_policy_ != "wait" && slots_full_policy_ != "finish") ||
+      (verification_ != "visual" && verification_ != "motion") || max_attempts_ < 1 || max_objects_ < 0)
+    {throw std::invalid_argument("Invalid task policy");}
+    for (const double value : {max_age_, timeout_, action_timeout_, recovery_timeout_,
+      verify_timeout_, slot_tolerance_})
+    {
+      if (!std::isfinite(value) || value <= 0) {throw std::invalid_argument("Invalid timeout/tolerance");}
+    }
+    for (const double value : {idle_timeout_, cooldown_, settle_time_, slot_clearance_}) {
+      if (!std::isfinite(value) || value < 0) {throw std::invalid_argument("Invalid wait/clearance");}
+    }
     subscription_ = create_subscription<Objects>(
-      declare_parameter<std::string>("objects_topic", "/perception/objects"),
-      rclcpp::SensorDataQoS(), [this](Objects::ConstSharedPtr objects) {
-        observations_ = objects;
-        last_received_ = now();
-      });
+      declare_parameter<std::string>("objects_topic", "/perception/objects"), rclcpp::SensorDataQoS(),
+      [this](Objects::ConstSharedPtr objects) {observations_ = objects; last_received_ = now(); ++sequence_;});
     pick_client_ = rclcpp_action::create_client<Pick>(this,
       declare_parameter<std::string>("pick_place_action", "/manipulation/pick_place"));
     named_client_ = rclcpp_action::create_client<Named>(this,
       declare_parameter<std::string>("move_to_named_action", "/manipulation/move_to_named"));
+    recovery_client_ = create_client<Trigger>(declare_parameter<std::string>(
+      "recovery_service", "/manipulation/release_held_object"));
     server_ = rclcpp_action::create_server<Sort>(this,
       declare_parameter<std::string>("action_name", "/sorting/sort_objects"),
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Sort::Goal> goal) {
-        const auto strategy = goal->strategy.empty() ? default_strategy_ : goal->strategy;
-        const auto & order = goal->color_order.empty() ? default_order_ : goal->color_order;
-        if (busy_ || !validPolicy(strategy, order)) {
-          return rclcpp_action::GoalResponse::REJECT;
-        }
+        if (busy_ || !validPolicy(goal->strategy.empty() ? default_strategy_ : goal->strategy,
+          goal->color_order.empty() ? default_order_ : goal->color_order))
+        {return rclcpp_action::GoalResponse::REJECT;}
         busy_ = true;
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
       },
-      [](std::shared_ptr<SortHandle>) { return rclcpp_action::CancelResponse::ACCEPT; },
+      [](std::shared_ptr<SortHandle>) {return rclcpp_action::CancelResponse::ACCEPT;},
       [this](std::shared_ptr<SortHandle> handle) {
         task_ = handle;
-        const auto goal = handle->get_goal();
-        strategy_ = goal->strategy.empty() ? default_strategy_ : goal->strategy;
-        order_ = goal->color_order.empty() ? default_order_ : goal->color_order;
-        pending_.clear();
-        batch_ready_ = false;
+        strategy_ = handle->get_goal()->strategy.empty() ? default_strategy_ : handle->get_goal()->strategy;
+        order_ = handle->get_goal()->color_order.empty() ? default_order_ : handle->get_goal()->color_order;
+        attempts_.clear();
+        unreachable_slots_.clear();
+        rule_targets_.clear();
         completed_ = 0;
-        phase_ = Phase::WAITING;
-        needs_observation_ = !observation_target_.empty();
-        observations_after_ = rclcpp::Time(0, 0, get_clock()->get_clock_type());
-        waiting_since_ = std::chrono::steady_clock::now();
-        waiting_reason_.clear();
+        verifying_ = idle_ = cancel_sent_ = false;
+        last_failed_.clear();
+        restartObservation();
         feedback("");
       });
-    // 所有任务状态都在同一个 executor 中更新；Action 等待使用异步回调。
-    timer_ = create_wall_timer(100ms, [this]() { tick(); });
-    RCLCPP_INFO(get_logger(), "Task planner ready; waiting for SortObjects goals");
+    // 单 executor 更新全部任务状态；运动和恢复均异步，不新增调度线程或 outbox。
+    timer_ = create_wall_timer(100ms, [this]() {tick();});
+    RCLCPP_INFO(get_logger(), "Adaptive planner ready (%s, retries=%d)", finish_mode_.c_str(), max_attempts_);
   }
 
 private:
-  static tf2::Vector3 xyz(const std::vector<double> & values)
+  static tf2::Vector3 xyz(const std::vector<double> & v)
   {
-    if (values.size() != 3 || !std::all_of(values.begin(), values.end(),
-      [](double v) { return std::isfinite(v); }))
-    {
-      throw std::invalid_argument("Expected three finite xyz parameter values");
+    if (v.size() != 3 || !std::all_of(v.begin(), v.end(), [](double x) {return std::isfinite(x);})) {
+      throw std::invalid_argument("Expected three finite xyz values");
     }
-    return {values[0], values[1], values[2]};
+    return {v[0], v[1], v[2]};
   }
-
+  static tf2::Vector3 position(const Object & o)
+  {return {o.pose.position.x, o.pose.position.y, o.pose.position.z};}
   static bool validPolicy(const std::string & strategy, const std::vector<uint8_t> & order)
   {
     const std::set<uint8_t> colors(order.begin(), order.end());
-    return (strategy == "color_order" || strategy == "nearest") && !order.empty() &&
+    return (strategy == "color_order" || strategy == "nearest") && !colors.empty() &&
            colors.size() == order.size() && *colors.begin() >= 1 && *colors.rbegin() <= 3;
   }
-
+  bool inWorkspace(const Object & o) const
+  {
+    if (workspace_min_.empty()) {return true;}
+    const auto p = position(o);
+    for (int i = 0; i < 3; ++i) {
+      if (p[i] < workspace_min_[i] || p[i] > workspace_max_[i]) {return false;}
+    }
+    return true;
+  }
+  tf2::Vector3 ruleGoal(const Object & o) const
+  {
+    const auto existing = rule_targets_.find(o.object_id);
+    if (existing != rule_targets_.end()) {return existing->second->goal;}
+    auto goal = position_values_[o.color];
+    const auto source = position(o);
+    for (int axis = 0; axis < 3; ++axis) {
+      if (position_modes_[axis] == "relative") {goal[axis] += source[axis];}
+    }
+    return goal;
+  }
+  bool near(const tf2::Vector3 & a, const tf2::Vector3 & b) const
+  {return (a - b).length() <= slot_tolerance_;}
+  void markPlaced(const std::string & observed_id)
+  {
+    if (use_position_rules_) {
+      auto target = rule_targets_.at(active_object_.object_id);
+      target->state = RuleState::PLACED;
+      if (!observed_id.empty()) {rule_targets_[observed_id] = target;}
+    } else {occupied_[active_slot_] = observed_id;}
+  }
+  bool sorted(const Object & o) const
+  {
+    if (use_position_rules_) {
+      if (near(position(o), ruleGoal(o))) {return true;}
+      return std::any_of(rule_targets_.begin(), rule_targets_.end(), [&](const auto & entry) {
+        const auto & target = *entry.second;
+        return target.color == o.color && target.state == RuleState::PLACED && near(position(o), target.goal);
+      });
+    }
+    return std::any_of(slots_[o.color].begin(), slots_[o.color].end(), [&](const auto & slot) {
+      return (position(o) - slot).length() <= slot_tolerance_;
+    });
+  }
   std::vector<Object> objectsInBase()
   {
     const auto & header = observations_->header;
-    if (header.frame_id.empty()) {
-      throw std::invalid_argument("Object list has no frame_id");
-    }
+    if (header.frame_id.empty()) {throw std::runtime_error("Observation has no frame_id");}
     geometry_msgs::msg::TransformStamped transform;
     if (header.frame_id != frame_) {
       transform = tf_buffer_.lookupTransform(frame_, header.frame_id, rclcpp::Time(header.stamp));
     }
-    std::set<std::string> ids;
-    auto objects = observations_->objects;
-    for (auto & object : objects) {
-      const auto & p = object.pose.position;
-      const auto & d = object.dimensions;
+    std::map<std::string, int> counts;
+    for (const auto & o : observations_->objects) {++counts[o.object_id];}
+    std::vector<Object> objects;
+    for (auto o : observations_->objects) {
+      const auto & d = o.dimensions;
       tf2::Quaternion q;
-      tf2::fromMsg(object.pose.orientation, q);
-      if (object.object_id.empty() || !ids.insert(object.object_id).second ||
-        object.color < 1 || object.color > 3 || !std::isfinite(p.x) ||
-        !std::isfinite(p.y) || !std::isfinite(p.z) ||
+      tf2::fromMsg(o.pose.orientation, q);
+      const auto p = position(o);
+      if (o.object_id.empty() || counts[o.object_id] != 1 || o.color < 1 || o.color > 3 ||
+        !std::isfinite(p.x()) || !std::isfinite(p.y()) || !std::isfinite(p.z()) ||
         !std::isfinite(d.x) || !std::isfinite(d.y) || !std::isfinite(d.z) ||
         d.x <= 0 || d.y <= 0 || d.z <= 0 || !std::isfinite(q.length2()) || q.length2() < 1e-12)
       {
-        throw std::invalid_argument("Invalid object ID, color, pose or dimensions");
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Ignoring invalid/duplicate object observation");
+        continue;
       }
       q.normalize();
-      object.pose.orientation = tf2::toMsg(q);
+      o.pose.orientation = tf2::toMsg(q);
       if (header.frame_id != frame_) {
         geometry_msgs::msg::PoseStamped source, result;
-        source.header = header;
-        source.pose = object.pose;
+        source.header = header; source.pose = o.pose;
         tf2::doTransform(source, result, transform);
-        object.pose = result.pose;
+        o.pose = result.pose;
       }
+      objects.push_back(o);
+    }
+    if (objects.empty() && !observations_->objects.empty()) {
+      throw std::runtime_error("No valid entries in nonempty observation");
     }
     return objects;
   }
-
-  Object selectTarget(const std::vector<Object> & candidates)
-  {
-    if (strategy_ == "color_order") {
-      const auto rank = [this](uint8_t color) {
-        return std::find(order_.begin(), order_.end(), color) - order_.begin();
-      };
-      return *std::min_element(candidates.begin(), candidates.end(),
-        [&](const auto & a, const auto & b) {
-          return rank(a.color) != rank(b.color) ? rank(a.color) < rank(b.color) :
-                 a.object_id < b.object_id;
-        });
-    }
-    // 每次派发前重新查询当前 TCP，距离策略不使用上一轮缓存的位置。
-    const auto transform = tf_buffer_.lookupTransform(frame_, tool_frame_, tf2::TimePointZero);
-    tf2::Transform tool;
-    tf2::fromMsg(transform.transform, tool);
-    const auto tcp = tool * tool_to_tcp_;
-    const auto distance = [&](const Object & object) {
-      const auto & p = object.pose.position;
-      return (tf2::Vector3(p.x, p.y, p.z) - tcp).length2();
-    };
-    return *std::min_element(candidates.begin(), candidates.end(),
-      [&](const auto & a, const auto & b) {
-        return distance(a) != distance(b) ? distance(a) < distance(b) :
-               a.object_id < b.object_id;
-      });
-  }
-
   void feedback(const std::string & id)
   {
     auto update = std::make_shared<Sort::Feedback>();
@@ -198,77 +296,247 @@ private:
     update->completed_count = completed_;
     task_->publish_feedback(update);
   }
-
   void finish(bool success, const std::string & message, bool canceled = false)
   {
     auto result = std::make_shared<Sort::Result>();
     result->success = success;
-    result->message = message;
-    if (canceled) {
-      task_->canceled(result);
-    } else if (success) {
-      task_->succeed(result);
-    } else {
-      task_->abort(result);
+    result->message = message + "; verified/completed=" + std::to_string(completed_) +
+      ", unresolved_attempted_targets=" + std::to_string(attempts_.size());
+    for (const auto & entry : attempts_) {
+      result->message += " [" + entry.first + ":" + std::to_string(entry.second.count) + " attempts]";
     }
-    RCLCPP_INFO(get_logger(), "%s", message.c_str());
-    task_.reset();
-    active_pick_.reset();
-    active_named_.reset();
-    busy_ = false;
+    if (canceled) {task_->canceled(result);} else if (success) {task_->succeed(result);} else {task_->abort(result);}
+    RCLCPP_INFO(get_logger(), "%s", result->message.c_str());
+    task_.reset(); active_pick_.reset(); active_named_.reset(); busy_ = false;
   }
-
   void waiting(const std::string & reason)
   {
-    if (reason != waiting_reason_) {
-      waiting_reason_ = reason;
-      RCLCPP_INFO(get_logger(), "%s", reason.c_str());
-    }
-    if (std::chrono::duration<double>(std::chrono::steady_clock::now() - waiting_since_).count()
-      >= timeout_)
-    {
-      finish(false, "Timed out: " + reason);
-    }
+    idle_ = false;  // 故障或无数据不能充当“健康空场景”。默认等待恢复，不结束任务。
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), static_cast<int64_t>(timeout_ * 1000), "%s", reason.c_str());
   }
-
+  void restartObservation()
+  {
+    phase_ = Phase::WAITING;
+    needs_observation_ = !observation_target_.empty();
+    observations_.reset();
+    observations_after_ = now() + rclcpp::Duration::from_seconds(settle_time_);
+    idle_ = cancel_sent_ = false;
+    next_try_ = Clock::now();
+    verification_since_ = now() + rclcpp::Duration::from_seconds(settle_time_);
+  }
   void observe()
   {
-    Named::Goal goal;
-    goal.target = observation_target_;
     phase_ = Phase::OBSERVING;
+    action_since_ = Clock::now();
     cancel_sent_ = false;
     const auto task = task_;
     rclcpp_action::Client<Named>::SendGoalOptions options;
     options.goal_response_callback = [this, task](NamedHandle::SharedPtr handle) {
-        if (task_ != task) { return; }
-        if (!handle) {
-          finish(false, "Observation motion rejected", task->is_canceling());
-        } else {
-          active_named_ = handle;
-        }
-      };
+      if (task_ != task) {return;}
+      if (!handle) {
+        if (task->is_canceling()) {finish(false, "Canceled", true); return;}
+        phase_ = Phase::WAITING;
+        next_try_ = Clock::now() + 1s;
+        waiting("Observation motion rejected; retrying");
+      } else {active_named_ = handle;}
+    };
     options.result_callback = [this, task](const NamedHandle::WrappedResult & result) {
-        if (task_ != task) { return; }
-        active_named_.reset();
-        if (task->is_canceling()) {
-          finish(false, "Sorting canceled after observation motion", true);
-        } else if (result.code != rclcpp_action::ResultCode::SUCCEEDED || !result.result->success) {
-          finish(false, "Observation motion failed: " + result.result->message);
-        } else {
-          needs_observation_ = false;
-          observations_.reset();
-          observations_after_ = now() + rclcpp::Duration::from_seconds(settle_time_);
-          waiting_since_ = std::chrono::steady_clock::now();
-          phase_ = Phase::WAITING;
-          waiting_reason_.clear();
-        }
-      };
-    RCLCPP_INFO(get_logger(), "Moving to observation target: %s", observation_target_.c_str());
+      if (task_ != task) {return;}
+      active_named_.reset();
+      if (task->is_canceling()) {finish(false, "Canceled after observation motion", true); return;}
+      restartObservation();
+      if (result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result && result.result->success) {
+        needs_observation_ = false;
+        verification_since_ = now();
+      } else {
+        next_try_ = Clock::now() + 1s;
+        waiting("Observation motion failed; retrying");
+      }
+    };
+    Named::Goal goal; goal.target = observation_target_;
     named_client_->async_send_goal(goal, options);
   }
-
-  void dispatch(const Object & object)
+  void failed(const std::string & message)
   {
+    last_failed_ = active_object_.object_id;
+    auto & attempt = attempts_[last_failed_];
+    if (retry_policy_ == "disabled") {attempt.count = max_attempts_;}
+    attempt.retry_after = now() + rclcpp::Duration::from_seconds(cooldown_);
+    RCLCPP_WARN(get_logger(), "Target %s attempt %d/%d: %s", last_failed_.c_str(),
+      attempt.count, max_attempts_, message.c_str());
+    if (attempt.count >= max_attempts_ && exhausted_policy_ == "stop") {
+      finish(false, "Attempt limit: " + last_failed_);
+    }
+  }
+  void startRecovery(bool holding)
+  {
+    phase_ = Phase::RECOVERING;
+    recovery_holding_ = holding;
+    recovery_since_ = Clock::now();
+    recovery_pending_ = false;
+    next_try_ = Clock::now();
+  }
+  void recover()
+  {
+    if (task_->is_canceling() && !recovery_pending_) {
+      finish(false, "Canceled; recovery stopped and load retained if present", true);
+      return;
+    }
+    if (Clock::now() - recovery_since_ > std::chrono::duration<double>(recovery_timeout_)) {
+      if (recovery_pending_) {recovery_client_->remove_pending_request(recovery_request_id_);}
+      finish(false, "Recovery not confirmed; executor state unknown (request may still be active)", task_->is_canceling());
+      return;
+    }
+    if (recovery_pending_ || Clock::now() < next_try_) {return;}
+    if (!recovery_client_->service_is_ready()) {waiting("Waiting for recovery service"); return;}
+    const auto task = task_;
+    recovery_pending_ = true;
+    const auto request = recovery_client_->async_send_request(std::make_shared<Trigger::Request>(),
+      [this, task](rclcpp::Client<Trigger>::SharedFuture future) {
+        if (task_ != task) {return;}
+        recovery_pending_ = false;
+        const auto response = future.get();
+        if (!response->success) {
+          RCLCPP_WARN(get_logger(), "Recovery retry: %s", response->message.c_str());
+          next_try_ = Clock::now() + 1s;
+          return;
+        }
+        if (task->is_canceling()) {finish(false, "Canceled after recovery", true); return;}
+        verifying_ = recovery_holding_;
+        if (verifying_) {
+          if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
+          else {occupied_[active_slot_] = "";}
+        }
+        if (!verifying_) {failed("Recovered; reacquiring target"); if (!task_) {return;}}
+        restartObservation();
+      });
+    recovery_request_id_ = request.request_id;
+  }
+  bool blocked(const Object & object, const tf2::Vector3 & target, const std::vector<Object> & objects) const
+  {
+    return std::any_of(objects.begin(), objects.end(), [&](const Object & other) {
+      if (other.object_id == object.object_id) {return false;}
+      const auto p = position(other);
+      return std::abs(p.x() - target.x()) < (object.dimensions.x + other.dimensions.x) / 2 + slot_clearance_ &&
+             std::abs(p.y() - target.y()) < (object.dimensions.y + other.dimensions.y) / 2 + slot_clearance_ &&
+             std::abs(p.z() - target.z()) < (object.dimensions.z + other.dimensions.z) / 2 + slot_clearance_;
+    });
+  }
+  int freeSlot(const Object & object, const std::vector<Object> & objects) const
+  {
+    if (use_position_rules_) {
+      const auto own = rule_targets_.find(object.object_id);
+      if (own != rule_targets_.end() && own->second->state == RuleState::UNREACHABLE) {return -1;}
+      const auto goal = ruleGoal(object);
+      if (blocked(object, goal, objects)) {return -1;}
+      for (const auto & entry : rule_targets_) {
+        const auto & target = *entry.second;
+        if (own != rule_targets_.end() && own->second == entry.second) {continue;}
+        if ((target.state == RuleState::RESERVED || target.state == RuleState::PLACED) &&
+          std::abs(goal.x() - target.goal.x()) < object.dimensions.x + slot_clearance_ &&
+          std::abs(goal.y() - target.goal.y()) < object.dimensions.y + slot_clearance_ &&
+          std::abs(goal.z() - target.goal.z()) < object.dimensions.z + slot_clearance_) {return -1;}
+      }
+      return 0;
+    }
+    for (size_t i = 0; i < slots_[object.color].size(); ++i) {
+      if (occupied_.count({object.color, i}) || unreachable_slots_.count({object.color, i})) {continue;}
+      if (!blocked(object, slots_[object.color][i], objects)) {return static_cast<int>(i);}
+    }
+    return -1;
+  }
+  void updateOccupancy(const std::vector<Object> & objects)
+  {
+    if (use_position_rules_) {
+      for (const auto & o : objects) {
+        if (o.tracking_uncertain) {continue;}
+        const auto known = rule_targets_.find(o.object_id);
+        if (known != rule_targets_.end() && known->second->state == RuleState::PLACED &&
+          !near(position(o), known->second->goal)) {known->second->state = RuleState::READY;}
+        // 视觉 ID 变化时，把已核验目标位的新 ID 关联到同一条规则记录。
+        for (const auto & entry : rule_targets_) {
+          if (entry.second->state == RuleState::PLACED && entry.second->color == o.color &&
+            near(position(o), entry.second->goal)) {
+            rule_targets_[o.object_id] = entry.second;
+            break;
+          }
+        }
+      }
+      return;
+    }
+    // 只有已关联物体明确移开才释放缓存；漏检/离开视野不等于槽位已空。
+    for (auto it = occupied_.begin(); it != occupied_.end();) {
+      const auto moved = std::find_if(objects.begin(), objects.end(), [&](const auto & o) {
+        return !o.tracking_uncertain && o.object_id == it->second &&
+               (position(o) - slots_[it->first.first][it->first.second]).length() > slot_tolerance_;
+      });
+      if (moved != objects.end()) {it = occupied_.erase(it);} else {++it;}
+    }
+    for (const auto & o : objects) {
+      if (o.tracking_uncertain) {continue;}
+      for (size_t i = 0; i < slots_[o.color].size(); ++i) {
+        if ((position(o) - slots_[o.color][i]).length() <= slot_tolerance_) {
+          occupied_[{o.color, i}] = o.object_id;
+          if (!verifying_ || o.object_id != active_object_.object_id) {attempts_.erase(o.object_id);}
+        }
+      }
+    }
+  }
+  bool verify(const std::vector<Object> & objects)
+  {
+    if (!verifying_) {return false;}
+    const auto & slot = active_destination_;
+    const auto destination = std::find_if(objects.begin(), objects.end(), [&](const auto & o) {
+      return !o.tracking_uncertain && o.color == active_object_.color &&
+             (position(o) - slot).length() <= slot_tolerance_;
+    });
+    const bool at_source = std::any_of(objects.begin(), objects.end(), [&](const auto & o) {
+      return o.color == active_object_.color && !sorted(o) &&
+             (position(o) - position(active_object_)).length() <= slot_tolerance_;
+    });
+    if (destination != objects.end() && !at_source) {
+      markPlaced(destination->object_id);
+      attempts_.erase(active_object_.object_id);
+      ++completed_;
+      verifying_ = false;
+      feedback(active_object_.object_id);
+      RCLCPP_INFO(get_logger(), "Placement verified: %s", active_object_.object_id.c_str());
+    } else if ((now() - verification_since_).seconds() >= verify_timeout_) {
+      verifying_ = false;
+      // 来源仍有物块、目标没有：很可能抓空，重新获取位置并有限重试。
+      if (at_source && destination == objects.end()) {
+        if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::READY;}
+        else {occupied_.erase(active_slot_);}
+      }
+      failed(at_source ? "Object remains at source" : "Placement unconfirmed; reserved slot retained");
+    } else {return true;}
+    return false;
+  }
+  Object selectTarget(const std::vector<Object> & candidates)
+  {
+    tf2::Vector3 tcp(0, 0, 0);
+    try {
+      const auto transform = tf_buffer_.lookupTransform(frame_, tool_frame_, tf2::TimePointZero);
+      tf2::Transform tool; tf2::fromMsg(transform.transform, tool); tcp = tool * tool_to_tcp_;
+    } catch (const tf2::TransformException &) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "TCP unavailable; using base distance");
+    }
+    const auto rank = [&](const Object & o) {
+      return strategy_ == "color_order" ? std::find(order_.begin(), order_.end(), o.color) - order_.begin() : 0;
+    };
+    return *std::min_element(candidates.begin(), candidates.end(), [&](const auto & a, const auto & b) {
+      if (retry_policy_ == "immediate" && (a.object_id == last_failed_) != (b.object_id == last_failed_)) {
+        return a.object_id == last_failed_;
+      }
+      if (rank(a) != rank(b)) {return rank(a) < rank(b);}
+      const double da = (position(a) - tcp).length2(), db = (position(b) - tcp).length2();
+      return da != db ? da < db : a.object_id < b.object_id;
+    });
+  }
+  void dispatch(const Object & object, size_t slot)
+  {
+    active_object_ = object;
+    active_slot_ = {object.color, slot};
     Pick::Goal goal;
     goal.object_id = object.object_id;
     goal.object_pose.header = observations_->header;
@@ -276,177 +544,188 @@ private:
     goal.object_pose.pose = object.pose;
     goal.object_dimensions = object.dimensions;
     goal.place_pose.header.frame_id = frame_;
-    const auto & place = places_[object.color];
-    goal.place_pose.pose.position.x = place.x();
-    goal.place_pose.pose.position.y = place.y();
-    goal.place_pose.pose.position.z = place.z();
-    goal.place_pose.pose.orientation = object.pose.orientation;
+    if (use_position_rules_) {
+      const auto target = ruleGoal(object);
+      if (!rule_targets_.count(object.object_id)) {
+        rule_targets_[object.object_id] = std::make_shared<RuleTarget>(RuleTarget{object.color, target});
+      }
+      active_destination_ = target;
+      RCLCPP_INFO(get_logger(), "Frozen placement %s modes=[%s,%s,%s] in %s: [%.4f, %.4f, %.4f]",
+        object.object_id.c_str(), position_modes_[0].c_str(), position_modes_[1].c_str(),
+        position_modes_[2].c_str(), frame_.c_str(), target.x(), target.y(), target.z());
+    } else {active_destination_ = slots_[object.color][slot];}
+    const auto p = active_destination_;
+    goal.place_pose.pose.position.x = p.x(); goal.place_pose.pose.position.y = p.y();
+    goal.place_pose.pose.position.z = p.z(); goal.place_pose.pose.orientation = object.pose.orientation;
     feedback(object.object_id);
+    RCLCPP_INFO(get_logger(), "Pick %s (%.3f, %.3f, %.3f) -> slot %zu (%.3f, %.3f, %.3f)",
+      object.object_id.c_str(), object.pose.position.x, object.pose.position.y, object.pose.position.z,
+      slot, p.x(), p.y(), p.z());
     phase_ = Phase::SENDING;
-    cancel_sent_ = false;
+    idle_ = cancel_sent_ = false;
+    action_since_ = Clock::now();
     const auto task = task_;
     rclcpp_action::Client<Pick>::SendGoalOptions options;
     options.goal_response_callback = [this, task](PickHandle::SharedPtr handle) {
-        if (task_ != task) { return; }
-        if (!handle) {
-          finish(false, "PickPlace rejected the target", task->is_canceling());
-          return;
-        }
-        active_pick_ = handle;
-        phase_ = Phase::EXECUTING;
-      };
-    options.result_callback = [this, task, id = object.object_id](const PickHandle::WrappedResult & r) {
-        if (task_ != task) { return; }
-        active_pick_.reset();
-        const bool success = r.code == rclcpp_action::ResultCode::SUCCEEDED && r.result->success;
-        if (success) {
-          pending_.erase(id);
-          ++completed_;
-          feedback(id);
-        }
-        if (task->is_canceling()) {
-          finish(false, "Sorting canceled after active PickPlace returned", true);
-        } else if (!success) {
-          finish(false, "PickPlace failed for " + id + ": " + r.result->message);
-        } else if (pending_.empty()) {
-          finish(true, "Batch motion sequences completed; placement needs visual verification");
-        } else {
-          phase_ = Phase::WAITING;
-          needs_observation_ = !observation_target_.empty();
-          waiting_since_ = std::chrono::steady_clock::now();
-          waiting_reason_.clear();
-        }
-      };
+      if (task_ != task) {return;}
+      if (!handle) {
+        if (task->is_canceling()) {finish(false, "Canceled", true); return;}
+        restartObservation(); next_try_ = Clock::now() + 1s;
+        waiting("PickPlace rejected; reacquiring without consuming attempt");
+      } else {
+        active_pick_ = handle; phase_ = Phase::EXECUTING;
+        ++attempts_[active_object_.object_id].count;
+      }
+    };
+    options.result_callback = [this, task](const PickHandle::WrappedResult & result) {
+      if (task_ != task) {return;}
+      active_pick_.reset();
+      if (task->is_canceling()) {
+        finish(false, "Canceled; executor load retained if present", true); return;
+      }
+      if (!result.result) {startRecovery(false); return;}
+      const auto & r = *result.result;
+      if (!r.ready_for_next_pick || r.holding) {startRecovery(r.holding); return;}
+      if (r.unreachable_placement) {
+        if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::UNREACHABLE;}
+        else {unreachable_slots_.insert(active_slot_);}
+        auto & count = attempts_[active_object_.object_id].count;
+        if (--count <= 0) {attempts_.erase(active_object_.object_id);}
+        RCLCPP_WARN(get_logger(), "Placement candidate unreachable; selecting another slot/target");
+      } else if (r.released) {
+        if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
+        else {occupied_[active_slot_] = "";}
+        if (verification_ == "motion") {
+          markPlaced("");
+          attempts_.erase(active_object_.object_id);
+          ++completed_; feedback(active_object_.object_id);
+        } else {verifying_ = true;}
+      } else {failed(r.message); if (!task_) {return;}}
+      restartObservation();
+    };
     pick_client_->async_send_goal(goal, options);
   }
-
   void tick()
   {
-    if (!task_) { return; }
+    if (!task_) {return;}
+    if (phase_ == Phase::RECOVERING) {recover(); return;}
     if (task_->is_canceling()) {
-      if (phase_ == Phase::WAITING) {
-        finish(false, "Sorting canceled before next pick", true);
-      } else if (active_pick_ && !cancel_sent_) {
-        cancel_sent_ = true;
-        pick_client_->async_cancel_goal(active_pick_);
-      } else if (active_named_ && !cancel_sent_) {
-        cancel_sent_ = true;
-        named_client_->async_cancel_goal(active_named_);
+      if (phase_ == Phase::WAITING) {finish(false, "Canceled", true);}
+      else if (active_pick_ && !cancel_sent_) {cancel_sent_ = true; pick_client_->async_cancel_goal(active_pick_);}
+      else if (active_named_ && !cancel_sent_) {cancel_sent_ = true; named_client_->async_cancel_goal(active_named_);}
+      return;
+    }
+    if (phase_ != Phase::WAITING) {
+      if (Clock::now() - action_since_ > std::chrono::duration<double>(action_timeout_) && !cancel_sent_) {
+        if (active_pick_) {pick_client_->async_cancel_goal(active_pick_); cancel_sent_ = true;}
+        if (active_named_) {named_client_->async_cancel_goal(active_named_); cancel_sent_ = true;}
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+          "Action timeout; requesting cancel and waiting for executor state");
       }
       return;
     }
-    if (phase_ != Phase::WAITING) { return; }
+    if (Clock::now() < next_try_) {return;}
     try {
       if (needs_observation_) {
-        if (!named_client_->action_server_is_ready()) {
-          waiting("Waiting for observation motion server");
-        } else {
-          observe();
-        }
+        if (named_client_->action_server_is_ready()) {observe();}
+        else {waiting("Waiting for observation server");}
         return;
       }
       if (!observations_ || (now() - last_received_).seconds() > max_age_) {
-        waiting("Waiting for fresh object observations");
-        return;
+        waiting("Waiting for fresh perception; task retained"); return;
       }
       const auto stamp = rclcpp::Time(observations_->header.stamp, get_clock()->get_clock_type());
-      if (last_received_ < observations_after_ ||
-        (stamp.nanoseconds() != 0 && stamp < observations_after_))
-      {
-        waiting("Waiting for images acquired after observation motion settled");
-        return;
+      if (last_received_ < observations_after_ || (stamp.nanoseconds() != 0 && stamp < observations_after_)) {return;}
+      if (stamp.nanoseconds() != 0 && ((now() - stamp).seconds() < -0.1 || (now() - stamp).seconds() > max_age_)) {
+        waiting("Waiting for current observation timestamps"); return;
       }
-      if (stamp.nanoseconds() != 0) {
-        const double age = (now() - stamp).seconds();
-        if (age < -0.1 || age > max_age_) {
-          waiting("Waiting for observations with a current timestamp");
-          return;
-        }
-      }
+      if (processed_sequence_ == sequence_) {return;}
+      processed_sequence_ = sequence_;
       const auto objects = objectsInBase();
-      if (!batch_ready_) {
-        for (const auto color : order_) {
-          if (std::none_of(objects.begin(), objects.end(),
-            [color](const auto & object) { return object.color == color; }))
-          {
-            waiting("Waiting for requested color " + std::to_string(color));
-            return;
-          }
-        }
-        // 固定本批 ID，防止已放置物体被重新识别后再次进入任务。
-        for (const auto & object : objects) {
-          if (std::find(order_.begin(), order_.end(), object.color) != order_.end()) {
-            pending_[object.object_id] = object.color;
-          }
-        }
-        batch_ready_ = true;
+      updateOccupancy(objects);
+      if (verification_since_.nanoseconds() == 0 && verifying_) {verification_since_ = now();}
+      if (verify(objects) || !task_) {return;}
+      if (max_objects_ > 0 && completed_ >= static_cast<uint32_t>(max_objects_)) {
+        finish(attempts_.empty(), "Object limit reached"); return;
       }
       std::vector<Object> candidates;
-      for (const auto & object : objects) {
-        const auto pending = pending_.find(object.object_id);
-        if (pending != pending_.end() && pending->second == object.color) {
-          candidates.push_back(object);
+      bool deferred = false, no_slots = false;
+      for (const auto & o : objects) {
+        if (!inWorkspace(o) || std::find(order_.begin(), order_.end(), o.color) == order_.end() || sorted(o)) {continue;}
+        if (o.tracking_uncertain) {deferred = true; continue;}
+        const auto attempt = attempts_.find(o.object_id);
+        if (attempt != attempts_.end()) {
+          if (attempt->second.count >= max_attempts_) {continue;}
+          if (now() < attempt->second.retry_after) {deferred = true; continue;}
+        }
+        if (freeSlot(o, objects) < 0) {no_slots = true; continue;}
+        candidates.push_back(o);
+      }
+      if (!candidates.empty()) {
+        idle_ = false;
+        if (!pick_client_->action_server_is_ready()) {waiting("Waiting for PickPlace server"); return;}
+        const auto object = selectTarget(candidates);
+        dispatch(object, static_cast<size_t>(freeSlot(object, objects)));
+      } else if (deferred || (no_slots && slots_full_policy_ == "wait")) {
+        waiting(no_slots ? "No free placement slot; waiting for space" : "Waiting for association/retry eligibility");
+      } else if (finish_mode_ == "batch" && idle_timeout_ > 0) {
+        if (!idle_) {idle_since_ = now(); idle_ = true;}
+        if ((now() - idle_since_).seconds() >= idle_timeout_) {
+          finish(attempts_.empty() && !no_slots, no_slots ? "Placement area full" : "No remaining actionable targets");
         }
       }
-      // 颜色顺序中，前一种颜色暂时丢失时等待它，不提前抓下一种。
-      if (strategy_ == "color_order") {
-        const auto first = std::find_if(order_.begin(), order_.end(), [this](uint8_t color) {
-          return std::any_of(pending_.begin(), pending_.end(),
-            [color](const auto & item) { return item.second == color; });
-        });
-        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
-          [first](const auto & object) { return object.color != *first; }), candidates.end());
-      }
-      if (candidates.empty()) {
-        waiting("Waiting for a remaining object in this batch");
-      } else if (!pick_client_->action_server_is_ready()) {
-        waiting("Waiting for PickPlace action server");
-      } else {
-        dispatch(selectTarget(candidates));
-      }
-    } catch (const tf2::TransformException & error) {
-      waiting("Waiting for TF: " + std::string(error.what()));
-    } catch (const std::exception & error) {
-      finish(false, error.what());
-    }
+    } catch (const std::exception & error) {waiting(error.what());}
   }
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<Objects>::SharedPtr subscription_;
-  rclcpp_action::Server<Sort>::SharedPtr server_;
   rclcpp_action::Client<Pick>::SharedPtr pick_client_;
   rclcpp_action::Client<Named>::SharedPtr named_client_;
+  rclcpp::Client<Trigger>::SharedPtr recovery_client_;
+  rclcpp_action::Server<Sort>::SharedPtr server_;
   rclcpp::TimerBase::SharedPtr timer_;
   Objects::ConstSharedPtr observations_;
-  rclcpp::Time last_received_{0, 0, RCL_ROS_TIME};
-  rclcpp::Time observations_after_{0, 0, RCL_ROS_TIME};
   std::shared_ptr<SortHandle> task_;
   PickHandle::SharedPtr active_pick_;
   NamedHandle::SharedPtr active_named_;
-  std::string observation_target_;
-  std::string frame_, tool_frame_, default_strategy_, strategy_, waiting_reason_;
+  std::array<std::vector<tf2::Vector3>, 4> slots_;
+  std::array<tf2::Vector3, 4> position_values_;
+  std::vector<std::string> position_modes_;
+  std::map<std::string, std::shared_ptr<RuleTarget>> rule_targets_;
+  tf2::Vector3 active_destination_;
+  bool use_position_rules_ = false;
+  std::set<Slot> unreachable_slots_;  // 仅本任务，抓前 IK 不可达的候选位置。
+  std::map<Slot, std::string> occupied_;  // 跨任务保留，最新观测可更新实际占用。
+  std::map<std::string, Attempt> attempts_;
+  Object active_object_;
+  Slot active_slot_{};
   tf2::Vector3 tool_to_tcp_;
-  std::array<tf2::Vector3, 4> places_;
   std::vector<uint8_t> default_order_, order_;
-  std::map<std::string, uint8_t> pending_;
-  double max_age_, timeout_, settle_time_;
+  std::vector<double> workspace_min_, workspace_max_;
+  std::string frame_, tool_frame_, default_strategy_, strategy_, observation_target_;
+  std::string finish_mode_, retry_policy_, exhausted_policy_, slots_full_policy_, verification_, last_failed_;
+  rclcpp::Time last_received_{0, 0, RCL_ROS_TIME}, observations_after_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time idle_since_{0, 0, RCL_ROS_TIME}, verification_since_{0, 0, RCL_ROS_TIME};
+  Clock::time_point action_since_, next_try_, recovery_since_;
+  double max_age_, timeout_, action_timeout_, recovery_timeout_, settle_time_, idle_timeout_;
+  double cooldown_, verify_timeout_, slot_tolerance_, slot_clearance_;
+  int max_attempts_, max_objects_;
+  int64_t recovery_request_id_ = 0;
+  uint64_t sequence_ = 0, processed_sequence_ = 0;
   uint32_t completed_ = 0;
-  bool busy_ = false, batch_ready_ = false, cancel_sent_ = false;
-  bool needs_observation_ = false;
+  bool busy_ = false, needs_observation_ = false, cancel_sent_ = false, verifying_ = false, idle_ = false;
+  bool recovery_pending_ = false, recovery_holding_ = false;
   Phase phase_ = Phase::WAITING;
-  std::chrono::steady_clock::time_point waiting_since_;
 };
 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  try {
-    rclcpp::spin(std::make_shared<TaskPlanner>());
-  } catch (const std::exception & error) {
+  try {rclcpp::spin(std::make_shared<TaskPlanner>());}
+  catch (const std::exception & error) {
     RCLCPP_ERROR(rclcpp::get_logger("task_planner"), "%s", error.what());
-    rclcpp::shutdown();
-    return 1;
+    rclcpp::shutdown(); return 1;
   }
   rclcpp::shutdown();
   return 0;

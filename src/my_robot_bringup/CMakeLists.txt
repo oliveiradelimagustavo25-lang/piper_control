@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(FILES ../../script/build/scene_config.py ../../script/build/placement_config.py DESTINATION share/${PROJECT_NAME}/build)
 
 install(FILES README.md DESTINATION share/${PROJECT_NAME})
 

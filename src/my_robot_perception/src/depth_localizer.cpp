@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <tuple>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -58,6 +59,13 @@ public:
     dimensions_.x = dimensions[0];
     dimensions_.y = dimensions[1];
     dimensions_.z = dimensions[2];
+    match_distance_ = declare_parameter<double>("track_match_distance", 0.025);
+    ambiguity_margin_ = declare_parameter<double>("track_ambiguity_margin", 0.003);
+    if (!std::isfinite(match_distance_) || match_distance_ <= 0 ||
+      !std::isfinite(ambiguity_margin_) || ambiguity_margin_ < 0)
+    {
+      throw std::invalid_argument("Invalid tracking distances");
+    }
     min_depth_ = declare_parameter<double>("min_depth", 0.05);
     max_depth_ = declare_parameter<double>("max_depth", 3.0);
     depth_tolerance_ = declare_parameter<double>("depth_tolerance", 0.02);
@@ -97,6 +105,56 @@ private:
     const auto middle = values.begin() + values.size() / 2;
     std::nth_element(values.begin(), middle, values.end());
     return *middle;
+  }
+
+  using Object = my_robot_interface::msg::DetectedObject;
+
+  void associate(std::vector<Object> & objects)
+  {
+    // ID 只在首次出现时分配。相机离开观察位或漏检不会注销历史轨迹。
+    std::sort(objects.begin(), objects.end(), [](const Object & a, const Object & b) {
+      return std::tie(a.color, a.pose.position.x, a.pose.position.y) <
+             std::tie(b.color, b.pose.position.x, b.pose.position.y);
+    });
+    struct Match {double distance; size_t detection, track;};
+    std::vector<Match> matches;
+    for (size_t i = 0; i < objects.size(); ++i) {
+      for (size_t j = 0; j < tracks_.size(); ++j) {
+        if (objects[i].color != tracks_[j].color) {continue;}
+        const auto & a = objects[i].pose.position;
+        const auto & b = tracks_[j].pose.position;
+        const double d = std::hypot(std::hypot(a.x - b.x, a.y - b.y), a.z - b.z);
+        if (d <= match_distance_) {matches.push_back({d, i, j});}
+      }
+    }
+    std::sort(matches.begin(), matches.end(), [](const Match & a, const Match & b) {
+      return std::tie(a.distance, a.detection, a.track) <
+             std::tie(b.distance, b.detection, b.track);
+    });
+    std::vector<bool> assigned(objects.size()), used(tracks_.size());
+    for (const auto & match : matches) {
+      if (assigned[match.detection] || used[match.track]) {continue;}
+      auto & object = objects[match.detection];
+      object.object_id = tracks_[match.track].object_id;
+      object.tracking_uncertain = std::any_of(matches.begin(), matches.end(),
+        [&](const Match & other) {
+          return ((other.detection == match.detection && other.track != match.track) ||
+                 (other.track == match.track && other.detection != match.detection)) &&
+                 std::abs(other.distance - match.distance) <= ambiguity_margin_;
+        });
+      assigned[match.detection] = used[match.track] = true;
+      // 歧义时不把猜测位置写回身份记录，等待分离后的新观测。
+      if (!object.tracking_uncertain) {tracks_[match.track] = object;}
+    }
+    const std::array<std::string, 4> names{"", "red", "green", "blue"};
+    for (size_t i = 0; i < objects.size(); ++i) {
+      if (assigned[i]) {continue;}
+      auto & object = objects[i];
+      object.tracking_uncertain = std::any_of(matches.begin(), matches.end(),
+        [i](const Match & match) {return match.detection == i;});
+      object.object_id = names[object.color] + "_" + std::to_string(++next_id_[object.color]);
+      if (!object.tracking_uncertain) {tracks_.push_back(object);}
+    }
   }
 
   void localize(const Image::ConstSharedPtr & labels_msg, const Image::ConstSharedPtr & depth_msg)
@@ -160,9 +218,6 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
           "Object center TF unavailable: %s", error.what());
       }
-      std::array<my_robot_interface::msg::DetectedObject, 3> best_objects;
-      std::array<int, 3> best_areas{};
-      const std::array<std::string, 3> ids{"red_cube", "green_cube", "blue_cube"};
       for (int color = 1; color <= 3; ++color) {
         cv::Mat mask = labels->image == color;
         if (erosion_size_ > 1) {
@@ -214,9 +269,9 @@ private:
           points.emplace_back(ray[0].x * z, ray[0].y * z, z);
           colors.push_back(static_cast<uint8_t>(color));
 
-          // 第一版：平放、轴向对齐的已知尺寸物块，每种颜色保留最大连通区域。
+          // 每个独立连通区域生成一个已知尺寸的平放物块。
           const int area = stats.at<int>(id, cv::CC_STAT_AREA);
-          if (objects_tf_ready && area > best_areas[color - 1]) {
+          if (objects_tf_ready) {
             std::vector<cv::Point2d> rays;
             cv::undistortPoints(inlier_pixels, rays, camera_matrix,
               distorted ? cv::Mat(info_->d) : cv::Mat());
@@ -244,8 +299,7 @@ private:
             RCLCPP_DEBUG(get_logger(), "color=%d area=%d surface=%zu top=%zu upper_z=%.5f",
               color, area, surface.size(), top_heights.size(), upper_z);
             if (top_heights.size() >= static_cast<size_t>(min_pixels_)) {
-              auto & object = best_objects[color - 1];
-              object.object_id = ids[color - 1];
+              my_robot_interface::msg::DetectedObject object;
               object.color = color;
               object.dimensions = dimensions_;
               object.pose.position.x = (lower.x() + upper.x()) / 2;
@@ -253,17 +307,17 @@ private:
               // objects_frame 的 Z 轴向上；上表面高度减半高得到物体中心。
               object.pose.position.z = median(top_heights) - dimensions_.z / 2;
               object.pose.orientation.w = 1.0;
-              best_areas[color - 1] = area;
+              objects.objects.push_back(object);
             }
           }
         }
       }
 
-      for (size_t i = 0; i < best_objects.size(); ++i) {
-        if (best_areas[i] > 0) { objects.objects.push_back(best_objects[i]); }
+      // TF 故障不是空场景；不更新身份，也不发布可被误判为清场的空列表。
+      if (objects_tf_ready) {
+        associate(objects.objects);
+        objects_pub_->publish(objects);
       }
-      // 包括空列表，防止规划器继续使用上一次检测到的目标。
-      objects_pub_->publish(objects);
 
       auto header = labels_msg->header;
       if (!points.empty() && !target_frame_.empty() && target_frame_ != header.frame_id) {
@@ -314,6 +368,9 @@ private:
     }
   }
 
+  std::vector<Object> tracks_;
+  std::array<uint64_t, 4> next_id_{};
+  double match_distance_, ambiguity_margin_;
   std::string target_frame_, objects_frame_;
   geometry_msgs::msg::Vector3 dimensions_;
   double min_depth_, max_depth_, depth_tolerance_, top_tolerance_, tf_timeout_;

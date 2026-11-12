@@ -95,6 +95,24 @@ MotionController::MotionController(const rclcpp::Node::SharedPtr & node, const O
 
 MotionController::~MotionController() = default;
 
+bool MotionController::canReachPose(const geometry_msgs::msg::PoseStamped & target)
+{
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  auto state = impl_->arm->getCurrentState();
+  if (!state || !finitePose(target.pose)) {return false;}
+  Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+  const auto & q = target.pose.orientation;
+  pose.linear() = Eigen::Quaterniond(q.w, q.x, q.y, q.z).normalized().toRotationMatrix();
+  const auto & p = target.pose.position;
+  pose.translation() = Eigen::Vector3d(p.x, p.y, p.z);
+  if (target.header.frame_id != state->getRobotModel()->getModelFrame()) {
+    if (!state->getRobotModel()->hasLinkModel(target.header.frame_id)) {return false;}
+    pose = state->getGlobalLinkTransform(target.header.frame_id) * pose;
+  }
+  const auto * group = state->getJointModelGroup(impl_->options.arm_group);
+  return group && state->setFromIK(group, pose, impl_->arm->getEndEffectorLink(), 0.2);
+}
+
 bool MotionController::moveToNamedTarget(const std::string & name)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);

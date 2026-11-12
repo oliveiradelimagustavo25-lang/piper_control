@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动三色仿真，到达观察姿态后执行一次分拣任务。
+# 读取总配置 scenes，启动链自动调用 build/scene_config.py 生成世界并执行分拣。
 set -e
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -9,6 +9,7 @@ show_window=''
 with_rviz=''
 launch_config="$root/config/mujoco_launch.yaml"
 planner_config=''
+dry_run=false
 
 usage() {
     cat <<'HELP'
@@ -17,13 +18,14 @@ usage() {
   --ros-domain-id N       ROS 域（默认继承环境，否则使用 227）
   --headless              隐藏 MuJoCo 窗口
   --no-debug-window       隐藏颜色调试窗口
+  --dry-run               只校验并显示放置规则，不启动节点或运动
   --rviz                  打开 MoveIt RViz（默认由总配置决定）
   --config FILE           总启动配置（默认 config/mujoco_launch.yaml）
   --planner-config FILE   任务规划器配置文件
   -h, --help              显示帮助
 
 例如: ./script/pick_three_colors.sh --ros-domain-id 227 -- sim_speed_factor:=0.5
-启动后自动移动到 pose_1，并执行一次三色分拣任务。
+场景由 config/mujoco_launch.yaml 的 scenes 自动生成；到 pose_1 后开始分拣。
 HELP
 }
 
@@ -40,6 +42,7 @@ while (( $# )); do
         --headless) headless=true; shift ;;
         --no-debug-window) show_window=false; shift ;;
         --rviz) with_rviz=true; shift ;;
+        --dry-run) dry_run=true; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         *) echo "未知选项: $1" >&2; usage; exit 2 ;;
@@ -52,6 +55,15 @@ export ROS_DOMAIN_ID=$ros_domain
 export PYTHONUNBUFFERED=1
 cd "$root"
 
+args=("launch_config:=$launch_config")
+if [[ -n $headless ]]; then args+=("headless:=$headless"); fi
+if [[ -n $show_window ]]; then args+=("show_window:=$show_window"); fi
+if [[ -n $with_rviz ]]; then args+=("with_rviz:=$with_rviz"); fi
+if [[ -n $planner_config ]]; then args+=("planner_config:=$planner_config"); fi
+if $dry_run; then
+    exec ros2 launch my_robot_bringup mujoco.launch.py "${args[@]}" "$@" dry_run:=true
+fi
+
 # 避免与同一 ROS 域中其他控制器及机器人描述混用。
 existing_nodes=$(timeout 8 ros2 node list --no-daemon)
 if [[ -n $existing_nodes ]]; then
@@ -59,11 +71,6 @@ if [[ -n $existing_nodes ]]; then
     exit 1
 fi
 
-args=("launch_config:=$launch_config")
-if [[ -n $headless ]]; then args+=("headless:=$headless"); fi
-if [[ -n $show_window ]]; then args+=("show_window:=$show_window"); fi
-if [[ -n $with_rviz ]]; then args+=("with_rviz:=$with_rviz"); fi
-if [[ -n $planner_config ]]; then args+=("planner_config:=$planner_config"); fi
 printf 'ROS 域: %s；总配置: %s\n' "$ROS_DOMAIN_ID" "$launch_config"
 if [[ -n $headless ]]; then printf '命令行覆盖 headless: %s\n' "$headless"; fi
 if [[ -n $show_window ]]; then printf '命令行覆盖 show_window: %s\n' "$show_window"; fi
@@ -77,20 +84,22 @@ tail_pid=''
 result_file=$(mktemp)
 cleanup() {
     for pid in "$action_pid" "$launch_pid"; do
-        if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
-            kill -INT -- "-$pid" 2>/dev/null || true
+        if [[ -n $pid ]]; then
+            # launch 自行转发 SIGINT；父进程已退出时再清理其独立进程组。
+            if kill -0 "$pid" 2>/dev/null; then kill -INT "$pid" 2>/dev/null || true
+            else kill -INT -- "-$pid" 2>/dev/null || true; fi
         fi
     done
     for _ in {1..10}; do
         alive=false
         for pid in "$action_pid" "$launch_pid"; do
-            if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then alive=true; fi
+            if [[ -n $pid ]] && kill -0 -- "-$pid" 2>/dev/null; then alive=true; fi
         done
         $alive || break
         sleep 1
     done
     for pid in "$action_pid" "$launch_pid"; do
-        if [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null; then
+        if [[ -n $pid ]] && kill -0 -- "-$pid" 2>/dev/null; then
             kill -KILL -- "-$pid" 2>/dev/null || true
         fi
         [[ -z $pid ]] || wait "$pid" 2>/dev/null || true
@@ -184,8 +193,8 @@ if [[ -z $sort_action ]] || ! kill -0 "$launch_pid" 2>/dev/null; then
 fi
 
 echo "正在通过 $sort_action 开始分拣；策略和颜色顺序使用任务规划器配置。"
-send_action "$sort_action" my_robot_interface/action/SortObjects '{}' '三色分拣'
-echo '分拣动作序列已完成；物块最终位置仍需视觉确认。'
+send_action "$sort_action" my_robot_interface/action/SortObjects '{}' '颜色分拣'
+echo '分拣任务已完成；完成判据使用 planner 的 placement_verification 配置。'
 echo '仿真保持运行，按 Ctrl+C 退出。'
 if ! wait "$launch_pid"; then
     echo '仿真启动进程异常退出，请检查上方日志。' >&2

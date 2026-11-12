@@ -138,6 +138,16 @@ python3 test/probes/check_planning_scene.py --grasp   # 额外验证抓放附着
 python3 test/probes/check_planning_scene.py --recovery # 取消后保留并显式释放
 ```
 
+## 自适应分拣
+
+规划器支持同色多物体、缺色不阻塞、按配置重试、工作区筛选和多放置槽位，默认抓后重新观察核验。抓取与放置可位于同一工作区；配置、异常处理边界、总配置内场景生成及测试入口见 [planner 说明](src/my_robot_planner/README.md)。
+
+## 一键生成场景并分拣
+
+只需修改 `config/mujoco_launch.yaml` 的 `scenes`，按颜色填写多个 `[x,y,z]`；不填使用原有默认三色，显式 `[]` 不生成对应颜色。运行 `./script/pick_three_colors.sh` 自动完成 XML 生成和完整启动，无需另建场景文件。辅助 Python 位于 `script/build/`，规则见 [脚本说明](script/README.md#场景与一键启动)。
+
+总配置还支持 `place_position_modes` 与 `place_positions`，按 X/Y/Z 混合相对偏移和绝对物体中心；显式规则覆盖 planner 的区域策略。可先运行 `./script/pick_three_colors.sh --dry-run` 查看有效规则及优先级，详见 [放置规则说明](script/README.md#放置坐标规则与优先级)。
+
 ## 三色抓放仿真
 
 构建工作区后，运行 `./script/pick_three_colors.sh`，脚本会读取工作区的 `config/mujoco_launch.yaml`、启动完整仿真，并在命名姿态接口就绪后自动移动到 `pose_1`，随后发送一次三色分拣任务；修改该配置后重新运行即可，无需重新构建。默认继承当前 ROS 域，未设置时使用 227；详细选项和限制见 [script/README.md](script/README.md)。

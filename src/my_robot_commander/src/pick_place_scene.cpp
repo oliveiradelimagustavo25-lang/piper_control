@@ -60,6 +60,7 @@ PickPlaceScene::PickPlaceScene(
   const std::string & frame, const std::string & tool_link)
 : node_(node), tf_(tf), frame_(frame), tool_link_(tool_link)
 {
+  alias_distance_ = parameter(node_, "visual_alias_distance", 0.004);
   touch_links_ = parameter<std::vector<std::string>>(node_, "touch_links", {"link7", "link8"});
   get_scene_ = node_->create_client<moveit_msgs::srv::GetPlanningScene>("get_planning_scene");
   auto update = diff();
@@ -120,17 +121,43 @@ void PickPlaceScene::sync(
   if (stamp.nanoseconds() != 0 && (age < -0.1 || age > 2.0)) {return;}
   auto update = diff();
   for (const auto & object : observations->objects) {
-    if (object.object_id == held_id_) {continue;}
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header = observations->header;
-    pose.pose = object.pose;
-    if (pose.header.frame_id != frame_) {
-      pose = tf_.transform(pose, frame_, tf2::durationFromSec(0.1));
+    if (object.object_id.empty() || object.object_id == held_id_ || object.tracking_uncertain) {continue;}
+    try {
+      geometry_msgs::msg::PoseStamped pose;
+      pose.header = observations->header;
+      pose.pose = object.pose;
+      const auto & p = pose.pose.position;
+      const auto & q = pose.pose.orientation;
+      const double norm = std::hypot(std::hypot(q.x, q.y), std::hypot(q.z, q.w));
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+        !std::isfinite(norm) || norm < 1e-9) {continue;}
+      pose.pose.orientation.x /= norm; pose.pose.orientation.y /= norm;
+      pose.pose.orientation.z /= norm; pose.pose.orientation.w /= norm;
+      if (pose.header.frame_id != frame_) {
+        pose = tf_.transform(pose, frame_, tf2::durationFromSec(0.1));
+      }
+      auto shape = box(object.object_id, pose,
+        {object.dimensions.x, object.dimensions.y, object.dimensions.z});
+      // 完成校验后才处理别名，坏尺寸不能误删已有碰撞物体。
+      // 仅合并同一位置的视觉别名，不把离开视野的障碍当作已消失。
+      for (auto it = visual_objects_.begin(); it != visual_objects_.end();) {
+        const auto & old = it->second.pose.position;
+        const auto & current = pose.pose.position;
+        if (it->first != object.object_id && it->first != held_id_ &&
+          std::hypot(std::hypot(old.x - current.x, old.y - current.y), old.z - current.z)
+          < alias_distance_)
+        {
+          auto remove = it->second;
+          remove.operation = remove.REMOVE;
+          update.world.collision_objects.push_back(remove);
+          it = visual_objects_.erase(it);
+        } else {++it;}
+      }
+      visual_objects_[object.object_id] = shape;
+      update.world.collision_objects.push_back(shape);
+    } catch (const std::exception & error) {
+      RCLCPP_WARN(node_->get_logger(), "Skipping invalid scene observation: %s", error.what());
     }
-    update.world.collision_objects.push_back(
-      box(
-        object.object_id, pose,
-        {object.dimensions.x, object.dimensions.y, object.dimensions.z}));
   }
   if (!update.world.collision_objects.empty()) {apply(update);}
 }
@@ -143,6 +170,7 @@ void PickPlaceScene::prepare(
   target_ = box(id, pose, {dimensions.x, dimensions.y, dimensions.z});
   auto update = diff();
   update.world.collision_objects.push_back(target_);
+  visual_objects_[id] = target_;
   collision_detection::AllowedCollisionMatrix matrix(collisionMatrix());
   previous_touch_.clear();
   for (const auto & link : touch_links_) {
@@ -173,6 +201,7 @@ void PickPlaceScene::attach()
   update.robot_state.attached_collision_objects.push_back(attached);
   apply(update);
   held_id_ = target_id_;
+  visual_objects_.erase(held_id_);
 }
 
 void PickPlaceScene::release()
@@ -193,6 +222,7 @@ void PickPlaceScene::release()
   update.robot_state.attached_collision_objects.push_back(remove);
   update.world.collision_objects.push_back(object);
   apply(update);
+  visual_objects_[held_id_] = object;
   held_id_.clear();
 }
 

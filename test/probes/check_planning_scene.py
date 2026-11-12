@@ -2,6 +2,7 @@
 """启动独立 MuJoCo，验证 MoveIt 场景同步和障碍碰撞。"""
 
 import argparse
+import copy
 import math
 import os
 from pathlib import Path
@@ -47,9 +48,9 @@ class SceneCheck(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
         raise RuntimeError(f'等待超时：{description}')
 
-    def call(self, client, request):
+    def call(self, client, request, timeout=8):
         future = client.call_async(request)
-        self.wait(future.done, 8, '规划场景服务')
+        self.wait(future.done, timeout, '规划场景服务')
         if future.result() is None:
             raise RuntimeError('规划场景服务失败')
         return future.result()
@@ -119,7 +120,25 @@ class SceneCheck(Node):
         cube = next(obj for obj in self.scene().world.collision_objects if obj.id == 'scene_probe_cube')
         if abs(cube.pose.position.y - 0.24) > 1e-6:
             raise AssertionError('下一次运动前没有更新视觉物块位置')
-        print('通过：地面、标记板和视觉物块碰撞盒', flush=True)
+        # 与有效物体同位置的坏尺寸/坏四元数不能通过别名合并删除有效盒。
+        msg = DetectedObjectArray()
+        msg.header.frame_id = 'base_link'
+        valid = DetectedObject()
+        valid.object_id, valid.color = 'scene_probe_cube', 1
+        valid.pose.position.x, valid.pose.position.y, valid.pose.position.z = 0.30, 0.24, 0.05
+        valid.pose.orientation.w = 1.0
+        valid.dimensions.x = valid.dimensions.y = valid.dimensions.z = 0.01
+        bad_size, bad_pose = copy.deepcopy(valid), copy.deepcopy(valid)
+        bad_size.object_id, bad_size.dimensions.x = 'invalid_size', -0.01
+        bad_pose.object_id, bad_pose.pose.orientation.w = 'invalid_pose', 0.0
+        msg.objects = [valid, bad_size, bad_pose]
+        for _ in range(10):
+            self.objects.publish(msg)
+            rclpy.spin_once(self, timeout_sec=0.05)
+        self.action(self.named, MoveToNamed.Goal(target='pose_1'))
+        ids = {o.id for o in self.scene().world.collision_objects}
+        assert 'scene_probe_cube' in ids and not {'invalid_size', 'invalid_pose'} & ids, ids
+        print('通过：地面、标记板、视觉物块及坏观测隔离', flush=True)
 
     def check_collision(self):
         self.wait(self.apply_scene.service_is_ready, 15, '场景写入服务')
@@ -193,6 +212,10 @@ class SceneCheck(Node):
         expected = GoalStatus.STATUS_CANCELED if cancel else GoalStatus.STATUS_SUCCEEDED
         if outcome is None or outcome.status != expected or (not cancel and not outcome.result.success):
             raise RuntimeError(f'抓放动作失败：{outcome}')
+        if cancel:
+            assert outcome.result.holding and not outcome.result.released, outcome.result
+        else:
+            assert outcome.result.released and not outcome.result.holding and outcome.result.ready_for_next_pick, outcome.result
         scene = self.scene()
         if cancel:
             if not attached_seen or not any(item.object.id == obj.object_id
@@ -203,7 +226,7 @@ class SceneCheck(Node):
             if blocked.result() is None or blocked.result().accepted:
                 raise AssertionError('保留负载时不应接收新的抓放请求')
             self.wait(self.release.service_is_ready, 10, '负载恢复服务')
-            response = self.call(self.release, Trigger.Request())
+            response = self.call(self.release, Trigger.Request(), timeout=90)
             if not response.success:
                 raise RuntimeError(f'负载恢复失败：{response.message}')
             scene = self.scene()

@@ -51,6 +51,8 @@ private:
   std::vector<std::string> touch_links_;
   std::map<std::string, int> previous_touch_;
   moveit_msgs::msg::CollisionObject target_;
+  std::map<std::string, moveit_msgs::msg::CollisionObject> visual_objects_;
+  double alias_distance_;
   moveit::planning_interface::PlanningSceneInterface scene_;
   rclcpp::Client<moveit_msgs::srv::GetPlanningScene>::SharedPtr get_scene_;
 };

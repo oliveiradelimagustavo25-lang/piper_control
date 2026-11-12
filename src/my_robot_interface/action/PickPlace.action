@@ -16,6 +16,10 @@ geometry_msgs/PoseStamped place_pose
 # Result：执行结果；最终是否进入颜色分拣区域由任务节点另行视觉验证。
 bool success
 string message
+bool holding                       # 执行器仍保留负载；不能直接开始下一抓
+bool released                      # 已在目标位置执行释放，不代表物理放置已核验
+bool unreachable_placement         # 抓取前发现放置位 IK 不可达，可换位置，不计物体抓取失败
+bool ready_for_next_pick            # 已空载、夹爪张开且碰撞许可恢复
 ---
 # Feedback：只报告主要阶段，完成或失败通过 Result 返回。
 uint8 PREPARING=0     # 检查目标、准备规划场景

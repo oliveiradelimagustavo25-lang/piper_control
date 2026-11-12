@@ -7,6 +7,7 @@
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <depend>rclcpp</depend>
+  <depend>std_srvs</depend>
   <depend>rclcpp_action</depend>
   <depend>my_robot_interface</depend>
   <depend>geometry_msgs</depend>

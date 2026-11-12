@@ -88,7 +88,7 @@ public:
     options.arm_group = parameter(node_, "arm_group", options.arm_group);
     options.gripper_group = parameter(node_, "gripper_group", options.gripper_group);
     frame_ = options.reference_frame = parameter(node_, "reference_frame", options.reference_frame);
-    options.end_effector_link = parameter<std::string>(node_, "end_effector_link", "link6");
+    tool_frame_ = options.end_effector_link = parameter<std::string>(node_, "end_effector_link", "link6");
     options.velocity_scaling = parameter(node_, "velocity_scaling", options.velocity_scaling);
     options.acceleration_scaling = parameter(node_, "acceleration_scaling", options.acceleration_scaling);
     options.planning_time = parameter(node_, "planning_time", options.planning_time);
@@ -167,6 +167,21 @@ public:
           return;
         }
         try {
+          // 带载时先沿已配置的目标卸载；不在失败点直接松爪。
+          if (holding_ || scene_->holding()) {
+            const auto transform = tf_buffer_.lookupTransform(frame_, tool_frame_, tf2::TimePointZero);
+            tf2::Transform tool;
+            tf2::fromMsg(transform.transform, tool);
+            auto lifted = tool * tool_to_tcp_;
+            lifted.setZ(std::max(lifted.z(), recovery_above_.z()));
+            if (!recovery_available_ ||
+              !motion_->moveToPose(toolPose(lifted, tool_rotation_, tool_to_tcp_, frame_), true) ||
+              !motion_->moveToPose(toolPose(recovery_above_, tool_rotation_, tool_to_tcp_, frame_)) ||
+              !motion_->moveToPose(toolPose(recovery_tcp_, tool_rotation_, tool_to_tcp_, frame_), true))
+            {
+              throw std::runtime_error("Cannot reach recovery placement; load retained");
+            }
+          }
           std::vector<double> joints;
           for (const auto sign : signs_) {joints.push_back(sign * open_width_ / 2.0);}
           if (!motion_->moveGripperToJoints(joints)) {throw std::runtime_error("Opening gripper failed");}
@@ -174,7 +189,7 @@ public:
           holding_ = false;
           scene_->restoreTouch();
           response->success = true;
-          response->message = "Gripper opened; planning-scene attachment released";
+          response->message = "Recovery placement/opening completed; verify using fresh observations";
         } catch (const std::exception & error) {
           response->message = error.what();
         }
@@ -213,6 +228,7 @@ private:
     } catch (const std::exception & error) {
       result->message = error.what();
     }
+    busy_ = false;
     if (rclcpp::ok()) {
       if (handle->is_canceling()) {
         result->success = false;
@@ -224,7 +240,6 @@ private:
         handle->abort(result);
       }
     }
-    busy_ = false;
   }
 
   bool validGoal(const Action::Goal & goal) const
@@ -262,6 +277,8 @@ private:
   void execute(const std::shared_ptr<GoalHandle> & handle)
   {
     auto result = std::make_shared<Action::Result>();
+    bool gripper_open = false;
+    recovery_available_ = false;
     auto feedback = std::make_shared<Action::Feedback>();
     const auto stage = [&](uint8_t value, const std::string & message) {
       feedback->stage = value;
@@ -286,7 +303,9 @@ private:
       for (const auto sign : signs_) {
         joints.push_back(sign * width / 2.0);
       }
-      return motion_->moveGripperToJoints(joints);
+      const bool moved = motion_->moveGripperToJoints(joints);
+      if (moved) {gripper_open = std::abs(width - open_width_) < 1e-6;}
+      return moved;
     };
 
     try {
@@ -320,12 +339,21 @@ private:
       const double safe_z = std::max({transport_z_, pick.z() + lift_, put.z() + retreat_});
       const tf2::Vector3 lifted(pick.x(), pick.y(), safe_z);
       const tf2::Vector3 pre_place(put.x(), put.y(), safe_z);
+      recovery_tcp_ = put;
+      recovery_above_ = pre_place;
+      recovery_available_ = true;
 
       syncScene();
       scene_->prepare(goal->object_id, object, goal->object_dimensions);
 
       stage(Action::Feedback::PICKING, "Opening, approaching and gripping " + goal->object_id);
       step("Open gripper", [&]() { return grip(open_width_); });
+      if (!motion_->canReachPose(toolPose(pre_place, tool_rotation_, tool_to_tcp_, frame_)) ||
+        !motion_->canReachPose(toolPose(put, tool_rotation_, tool_to_tcp_, frame_)))
+      {
+        result->unreachable_placement = true;
+        throw std::runtime_error("Placement IK unavailable; choose another position before picking");
+      }
       step("Move to pre-grasp", [&]() { return move(pre_pick, false); });
       step("Descend to grasp", [&]() { return move(pick, true); });
       step("Close gripper", [&]() {
@@ -345,6 +373,7 @@ private:
         if (!grip(open_width_)) {return false;}
         scene_->release();
         holding_ = false;
+        result->released = true;
         return true;
       });
       step("Retreat", [&]() { return move(put + tf2::Vector3(0, 0, retreat_), true); });
@@ -356,10 +385,13 @@ private:
     }
     try {
       scene_->restoreTouch();
+      result->ready_for_next_pick = !holding_ && gripper_open;
     } catch (const std::exception & error) {
       result->success = false;
       result->message += "; restoring collision checks failed: " + std::string(error.what());
     }
+    result->holding = holding_ || scene_->holding();
+    busy_ = false;  // 在结果可见前交还执行权，避免下一请求撞上旧 busy。
     if (rclcpp::ok()) {
       if (handle->is_canceling()) {
         result->success = false;
@@ -371,7 +403,6 @@ private:
         handle->abort(result);
       }
     }
-    busy_ = false;
   }
 
   rclcpp::Node::SharedPtr node_;
@@ -389,8 +420,9 @@ private:
   std::thread worker_;
   std::atomic<bool> busy_{false};
   std::atomic<bool> holding_{false};
-  std::string frame_;
-  tf2::Vector3 tool_to_tcp_, offset_;
+  std::string frame_, tool_frame_;
+  tf2::Vector3 tool_to_tcp_, offset_, recovery_tcp_, recovery_above_;
+  bool recovery_available_ = false;
   tf2::Quaternion tool_rotation_;
   std::vector<double> signs_;
   double approach_, lift_, transport_z_, clearance_, retreat_;

@@ -4,18 +4,46 @@ task_planner:
     action_name: /sorting/sort_objects
     pick_place_action: /manipulation/pick_place
     move_to_named_action: /manipulation/move_to_named
-    observation_target: pose_1      # SRDF arm 命名姿态；固定外部相机可设为 ""
-    observation_settle_time: 0.3    # s，到位后等待新图像；每个物块抓取前返回观察位
+    recovery_service: /manipulation/release_held_object
+    observation_target: pose_1
+    observation_settle_time: 0.3
     reference_frame: base_link
     end_effector_frame: link6
-    tool_to_tcp: [0.0, 0.0, 0.132]   # 与 manipulation.yaml 的 TCP 标定一致
+    tool_to_tcp: [0.0, 0.0, 0.132]
 
     default_strategy: color_order
-    default_color_order: [1, 2, 3]   # 红、绿、蓝
-    max_observation_age: 2.0         # s，拒绝过期观测
-    observation_timeout: 5.0         # s，等待目标/TF/执行服务的最长时间
+    default_color_order: [1, 2, 3]   # 红、绿、蓝；缺色不阻塞
+    finish_mode: batch              # batch: 健康空闲后结束；watch: 持续等待
+    idle_timeout: 3.0               # s，0 不自动结束
+    max_objects: 0                 # 0 不限；按已核验搬运次数计数
+    retry_policy: priority         # priority / immediate / disabled
+    max_attempts: 3                # 包含首次；不会因漏检而清零
+    retry_cooldown: 0.0            # s，默认重新观察后即可参与优先级选择
+    on_attempts_exhausted: continue # continue: 其他物体继续；stop: 结束任务
+    on_slots_full: wait            # wait / finish；不强行重叠放置
+    placement_verification: visual # visual / motion（motion 仅确认运动流程）
+    verification_timeout: 3.0      # s，回观察位后等待抓后核验
+    slot_tolerance: 0.012          # m，物体中心相对本颜色槽位的容差
+    slot_clearance: 0.025          # m，放置候选与已观测物体之间的额外净空
+    max_observation_age: 2.0
+    observation_timeout: 5.0       # s，等待异常的告警间隔，默认保留任务等待恢复
+    action_timeout: 180.0          # s，超时请求取消，等待执行器返回状态
+    recovery_timeout: 90.0         # s，不能确认恢复时结束，保留负载状态
 
-    # 物体中心的放置位置，使用 reference_frame，m；当前为 1 cm 地面物块。
-    red.place_position: [0.26, -0.06, 0.005]
+    # 空列表不限制区域。可填写 base_link 下的 xyz 下界/上界；放置点可在区内。
+    workspace_min: []
+    workspace_max: []
+
+    # 以原点为中心、按间距在各颜色区域内自动生成放置候选，不配置每色物体数量。
+    # region: [xmin, ymin, xmax, ymax, 物体中心z]，m；可移动/扩大区域以适配工作台。
+    # 规则入口位于总配置。独立启动时可在此配置 place_positions.red/green/blue。
+    # 未提供三色 place_positions 时使用下面区域；相对模式不能套用旧区域原点。
+    place_position_modes: [absolute, absolute, absolute]
+    placement_step: [0.04, 0.06]
+    red.place_position: [0.26, -0.12, 0.005]
+    red.place_region: [0.25, -0.14, 0.39, -0.10, 0.005]
     green.place_position: [0.26, 0.0, 0.005]
-    blue.place_position: [0.26, 0.06, 0.005]
+    green.place_region: [0.25, -0.06, 0.39, 0.06, 0.005]
+    blue.place_position: [0.26, 0.12, 0.005]
+    blue.place_region: [0.25, 0.10, 0.39, 0.14, 0.005]
+    # 如需手动指定个别位置，<color>.place_slots 的扁平 xyz 列表优先于 region。

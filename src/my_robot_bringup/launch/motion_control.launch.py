@@ -1,6 +1,7 @@
 """Start the pick/place executor and sorting task planner."""
 
 from pathlib import Path
+import importlib.util
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -23,6 +24,14 @@ EXECUTION_ARGUMENTS = {
 }
 
 
+def resolve_placement(planner, modes='', positions=''):
+    path = Path(get_package_share_directory('my_robot_bringup')) / 'build/placement_config.py'
+    spec = importlib.util.spec_from_file_location('piper_placement_config', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.resolve(planner, modes, positions)
+
+
 def launch_setup(context):
     from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -43,7 +52,10 @@ def launch_setup(context):
     execution = yaml.safe_load(Path(argument('manipulation_config')).read_text())['pick_place_executor']['ros__parameters']
     planner = yaml.safe_load(Path(argument('planner_config')).read_text())['task_planner']['ros__parameters']
     execution = dict(execution)
-    planner = dict(planner)
+    # launch_ros cannot serialize empty arrays. Omitted optional arrays use the
+    # planner's typed defaults (unrestricted workspace / legacy single slot).
+    planner = resolve_placement(planner, argument('place_position_modes'), argument('place_positions'))
+    planner = {name: value for name, value in planner.items() if value != []}
     for name, (value_type, _) in EXECUTION_ARGUMENTS.items():
         if argument(name):
             execution[name] = value_type(argument(name))
@@ -95,6 +107,8 @@ def generate_launch_description():
         'sort_action': 'Sorting action name',
         'objects_topic': 'Detected objects input topic',
         'observation_target': 'Observation named pose',
+        'place_position_modes': 'X/Y/Z relative or absolute modes',
+        'place_positions': 'Color center coordinates or offsets',
     }.items():
         arguments.append(DeclareLaunchArgument(name, default_value='', description=description + '; empty uses YAML'))
     arguments.extend(DeclareLaunchArgument(name, default_value='', description=description + '; empty uses YAML')

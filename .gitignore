@@ -1,4 +1,6 @@
 build/
+!script/build/
+!script/build/**
 install/
 log/
 .vscode/
@@ -6,3 +8,6 @@ test/local/
 __pycache__/
 *.py[cod]
 docs/
+
+# script/build contains source helpers; only generated caches stay ignored.
+/script/build/runtime/

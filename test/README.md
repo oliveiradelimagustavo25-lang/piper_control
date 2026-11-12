@@ -84,3 +84,13 @@ python3 test/probes/check_planning_scene.py --recovery
 探针默认使用独立 ROS 域 185，启动无窗口 MuJoCo 与 MoveIt。基础检查向感知话题发布合成物块，验证地面、标记板与物块碰撞盒、障碍加入和移除后的状态检测；`--grasp` 额外检查抓放期间附着及释放后的规划盒位置；`--recovery` 检查附着后取消、带载拒绝新抓放及显式释放。可用 `--ros-domain-id` 调整测试域、`--objects-topic` 测试自定义物体话题；若该域已发现其他节点，探针会退出。启动日志位于 `log/planning_scene/`。
 
 这些检查使用合成视觉观测，验证的是 MoveIt 规划场景，不单独证明 MuJoCo 物理抓取成功；完整相机和物理效果需要另行观察。
+
+## 自适应分拣
+
+`probes/check_multi_object_perception.py` 使用合成标签/深度检查多实例、移动、重现、歧义和 TF 异常；`probes/check_adaptive_planner.py` 用模拟执行器检查缺色、重试、抓空核验、ROI、重现优先级及取消，不证明物理抓取。
+
+`check_scene_config.py` 离线检查总配置场景生成与默认/优先级语义。`xvfb-run -a python3 test/probes/check_multi_object_sorting.py` 直接运行唯一 `.sh` 入口；可用 `--red 0 --green 4 --blue 0`、`--red 3 --green 1 --blue 1` 生成临时测试输入，也可直接测试 `--config` 指定的总配置。测试不传 XML，验收数量和放置位置从输入及运行中参数推导。每次使用空闲独立 ROS 域，可用 `--ros-domain-id` 覆盖。详细配置与局限见 [planner 说明](../src/my_robot_planner/README.md)。
+
+`python3 test/probes/check_clear_processes.py` 离线检查清理选择边界，不创建或终止任何节点；覆盖孤立 launch 连带节点、正常 launch 保留、跨域/跨目录排除与 RViz 范围。
+
+`check_placement_config.py` 验证放置规则校验、实际 launch 参数优先级和脚本 dry-run。调度探针增加逐轴混合、负绝对 Z、冻结目标重试、抓空、目标 ID 改变、零偏移和占用等待等用例；完整入口探针同时支持区域和相对/绝对规则，从运行参数推导目标。

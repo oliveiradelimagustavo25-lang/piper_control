@@ -7,3 +7,4 @@ string object_id
 uint8 color
 geometry_msgs/Pose pose             # 物体几何中心
 geometry_msgs/Vector3 dimensions    # 物体自身坐标系尺寸，m
+bool tracking_uncertain            # 同色关联有歧义；等待后续观测，不据此重置重试次数

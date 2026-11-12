@@ -2,10 +2,15 @@
 
 from functools import lru_cache
 from pathlib import Path
+import importlib.util
+import shutil
+import tempfile
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, LogInfo
+from launch.actions import RegisterEventHandler
+from launch.event_handlers import OnShutdown
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitution import Substitution
@@ -51,8 +56,17 @@ CONFIG_PATHS = {
 }
 CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATHS | {
     'headless', 'with_moveit', 'with_rviz', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
-    'sim_speed_factor', 'planning_pipeline', 'pick_place_action', 'sort_action', 'observation_target',
+    'sim_speed_factor', 'planning_pipeline', 'pick_place_action', 'sort_action', 'observation_target', 'scenes', 'place_position_modes', 'place_positions', 'dry_run',
 }
+
+
+@lru_cache(maxsize=1)
+def placement_config():
+    path = Path(get_package_share_directory('my_robot_bringup')) / 'build/placement_config.py'
+    spec = importlib.util.spec_from_file_location('piper_placement_config', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 @lru_cache(maxsize=8)
@@ -68,7 +82,14 @@ def load_launch_config(path):
     unknown = set(data) - CONFIG_KEYS
     if unknown:
         raise ValueError(f'Unknown launch_config arguments: {sorted(unknown)}')
+    placement_config().parameters(data)
     for name, value in data.items():
+        if name in ('place_position_modes', 'place_positions'):
+            continue
+        if name == 'scenes':
+            if value is not None and not isinstance(value, dict):
+                raise ValueError('scenes must map colors to lists of [x, y, z]')
+            continue
         if value is not None and not isinstance(value, (str, int, float, bool)):
             raise ValueError(f'launch_config value for {name} must be a scalar')
     return data
@@ -90,14 +111,34 @@ class ConfigDefault(Substitution):
         config_file = LaunchConfiguration('launch_config').perform(context)
         if config_file:
             path = Path(config_file).expanduser().resolve()
-            value = load_launch_config(str(path)).get(self.name)
+            config = load_launch_config(str(path))
+            value = config.get(self.name)
             if value is not None:
+                if self.name in ('place_position_modes', 'place_positions'):
+                    return yaml.safe_dump(value, default_flow_style=True, width=100000).strip()
                 if isinstance(value, bool):
                     return str(value).lower()
                 value = str(value)
                 if self.name in CONFIG_PATHS and value:
                     return str((path.parent / value).resolve())
                 return value
+            if self.name == 'scene_file' and config.get('scenes'):
+                # Explicit scene_file (CLI or YAML) has priority. Otherwise the
+                # one-click entry and direct launch share the same generator.
+                key = '_piper_scene_runtime'
+                if key not in context.launch_configurations:
+                    directory = tempfile.mkdtemp(prefix='piper_scene_')
+                    helper = Path(get_package_share_directory('my_robot_bringup')) / 'build/scene_config.py'
+                    spec = importlib.util.spec_from_file_location('piper_scene_config', helper)
+                    module = importlib.util.module_from_spec(spec)
+                    try:
+                        spec.loader.exec_module(module)
+                        module.generate(config['scenes'], directory, get_package_share_directory('my_robot_world'))
+                    except Exception:
+                        shutil.rmtree(directory, ignore_errors=True)
+                        raise
+                    context.launch_configurations[key] = directory
+                return str(Path(context.launch_configurations[key]) / 'scene.xml')
         return perform_substitutions(context, self.fallback)
 
 
@@ -124,6 +165,7 @@ def control_layer(bringup, argument):
 def motion_layer(bringup, argument, objects_topic):
     names = ('planning_pipeline', 'moveit_controllers_file', 'manipulation_config',
              'planner_config', 'pick_place_action', 'sort_action', 'observation_target',
+             'place_position_modes', 'place_positions',
              *EXECUTION_ARGUMENTS)
     arguments = {name: argument(name) for name in names}
     arguments.update(robot_description=LaunchConfiguration('_piper_control_description'), objects_topic=objects_topic)
@@ -172,7 +214,18 @@ def launch_setup(context):
     if with_perception and not objects_topic:
         perception_config = yaml.safe_load(Path(argument('perception_config')).read_text())
         objects_topic = perception_config['depth_localizer']['ros__parameters']['objects_topic']
-    layers = [control_layer(bringup, argument)]
+    layers = []
+    runtime = context.launch_configurations.get('_piper_scene_runtime')
+    if runtime:
+        layers.append(RegisterEventHandler(OnShutdown(
+            on_shutdown=lambda event, context: shutil.rmtree(runtime, ignore_errors=True))))
+    if IfCondition(LaunchConfiguration('dry_run')).evaluate(context):
+        planner = yaml.safe_load(Path(argument('planner_config')).read_text())['task_planner']['ros__parameters']
+        planner = placement_config().resolve(planner, argument('place_position_modes'), argument('place_positions'))
+        execution = yaml.safe_load(Path(argument('manipulation_config')).read_text())['pick_place_executor']['ros__parameters']
+        frame = argument('reference_frame') or execution.get('reference_frame', 'base_link')
+        return layers + [LogInfo(msg=line) for line in placement_config().describe(planner, frame)]
+    layers.append(control_layer(bringup, argument))
     if with_motion:
         layers.append(motion_layer(bringup, argument, objects_topic))
     if with_perception:
@@ -192,6 +245,9 @@ def generate_launch_description():
     arguments = [
         DeclareLaunchArgument('launch_config', default_value='',
                               description='Optional external YAML with launch argument defaults'),
+        config_argument('dry_run', default_value='false', choices=['true', 'false'], description='Validate and describe placement without starting nodes'),
+        config_argument('place_position_modes', default_value='', description='X/Y/Z relative or absolute modes; empty uses planner YAML'),
+        config_argument('place_positions', default_value='', description='Mapping of red/green/blue center coordinates or offsets'),
         config_argument('headless', default_value='false', choices=['true', 'false'],
                               description='Run without the MuJoCo window'),
         config_argument('with_moveit', default_value='true', choices=['true', 'false'],

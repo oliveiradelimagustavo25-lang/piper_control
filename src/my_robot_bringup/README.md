@@ -33,7 +33,7 @@ ros2 launch my_robot_bringup mujoco.launch.py launch_config:="$PWD/config/mujoco
 ros2 launch my_robot_bringup mujoco.launch.py --show-args
 ```
 
-直接运行 `mujoco.launch.py` 而不传 `launch_config` 时使用其自身默认值，不会自动读取脚本的外部文件。总配置是 launch 参数的平铺映射，支持 `--show-args` 中除 `launch_config` 本身之外的参数；未写入或写为 `null` 的参数使用原默认值。配置路径可为绝对路径或相对于总 YAML 的路径，写错参数名会明确报错。`--show-args` 显示可用参数及原始回退值，文件中的实际配置请直接查看 YAML。`ROS_DOMAIN_ID` 属于环境变量，通过脚本的 `--ros-domain-id` 或终端环境设置，不写入总配置。
+直接运行 `mujoco.launch.py` 而不传 `launch_config` 时使用其自身默认值，不会自动读取脚本的外部文件。总配置包含 `scenes` 场景映射及其他 launch 参数的平铺映射，支持 `--show-args` 中除 `launch_config` 本身之外的参数；未写入或写为 `null` 的参数使用原默认值。配置路径可为绝对路径或相对于总 YAML 的路径，写错参数名会明确报错。`--show-args` 显示可用参数及原始回退值，文件中的实际配置请直接查看 YAML。`ROS_DOMAIN_ID` 属于环境变量，通过脚本的 `--ros-domain-id` 或终端环境设置，不写入总配置。
 
 常规参数的优先级是：**命令行显式参数 > 外部总 YAML 中同名参数 > 对应节点 YAML 的值 > 节点代码默认值**。launch 参数留空表示不覆盖节点 YAML。总入口还会主动同步跨节点接口：
 
@@ -136,3 +136,11 @@ ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
 ```
 
 执行器在命名姿态和抓放动作前，将最新视觉观测同步为 MoveIt 碰撞盒；碰撞场景不是对 MuJoCo 世界的实时镜像。任务运动完成不代表物理夹取和最终放置位置已核验。现有环境中部分 C++ 进程退出时仍可能出现析构异常，需结合子进程日志检查。
+
+## 总配置内的场景列表
+
+`mujoco_launch.yaml` 的 `scenes` 可按 red/green/blue 填写多个 `[x,y,z]`。默认不填或 `{}` 保留原三色；某颜色省略沿用默认，`[]` 清空该颜色。入口自动生成临时 XML，不需要独立场景 YAML 或手动生成步骤。显式 `scene_file` 仍优先；生成辅助源码在 `script/build/scene_config.py`，构建时安装到本包供启动链调用。见 [脚本说明](../../script/README.md#场景与一键启动)。
+
+## 放置规则参数
+
+`place_position_modes` 与 `place_positions` 可在总配置设置，或作为同名 launch 参数覆盖。启动层校验并传给 planner；不传给执行器做二次偏移。优先级为显式 launch 参数 > 总配置 > planner YAML > 节点默认。配置了显式规则时覆盖旧区域/槽位策略；没有规则保留旧策略。`dry_run:=true` 仅打印有效规则、不启动节点；脚本提供 `--dry-run`。见 [放置规则说明](../../script/README.md#放置坐标规则与优先级)。
