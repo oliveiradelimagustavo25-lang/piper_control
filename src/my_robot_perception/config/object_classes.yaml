@@ -1,0 +1,53 @@
+# 类别定义的唯一来源；id 是类别，不是场景实例编号，也不代表物体数量。
+# mono8 标签图：0=背景，1..255=类别；列表顺序决定 CV 阈值重叠时的优先级。
+# 当前 CV 只按颜色识别，depth 只支持顶部可见的平放 box；尺寸为标称完整边长，m。
+# simulation.default_position 仅在 scenes 未填写/null 时使用；新类别不必设置默认生成位置。
+classes:
+  - id: 1
+    name: red_cube
+    color: red
+    simulation:
+      default_position: [0.32, -0.08, 0.03]
+    geometry:
+      type: box
+      dimensions: [0.03, 0.03, 0.03]
+    cv:
+      hsv_lower: [170, 100, 50]
+      hsv_upper: [10, 255, 255]
+
+  - id: 2
+    name: green_cube
+    color: green
+    simulation:
+      default_position: [0.32, 0.0, 0.03]
+    geometry:
+      type: box
+      dimensions: [0.03, 0.03, 0.03]
+    cv:
+      hsv_lower: [35, 80, 50]
+      hsv_upper: [85, 255, 255]
+
+  - id: 3
+    name: blue_cube
+    color: blue
+    simulation:
+      default_position: [0.32, 0.08, 0.03]
+    geometry:
+      type: box
+      dimensions: [0.03, 0.03, 0.03]
+    cv:
+      hsv_lower: [90, 80, 50]
+      hsv_upper: [135, 255, 255]
+
+  - id: 4
+    name: yellow_cube
+    color: yellow
+    simulation:
+      default_position: [0.32, 0.16, 0.03]
+      rgba: [1.0, 1.0, 0.0, 1.0]
+    geometry:
+      type: box
+      dimensions: [0.03, 0.03, 0.03]
+    cv:
+      hsv_lower: [20, 100, 50]
+      hsv_upper: [34, 255, 255]

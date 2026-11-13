@@ -38,6 +38,7 @@ ros2 launch my_robot_bringup mujoco.launch.py --show-args
 常规参数的优先级是：**命令行显式参数 > 外部总 YAML 中同名参数 > 对应节点 YAML 的值 > 节点代码默认值**。launch 参数留空表示不覆盖节点 YAML。总入口还会主动同步跨节点接口：
 
 - 相机 RGB、深度及 CameraInfo 的显式 launch 参数会覆盖感知 YAML 中的对应话题，并同时用于相机发布和感知订阅；留空则使用感知 YAML。
+- `class_config` 同时传给 CV 和 depth；留空时读取感知 YAML 中 `/**/ros__parameters/class_config`（相对于感知 YAML），再回退安装包类别表。类别、HSV 和标称尺寸统一定义在 [object_classes.yaml](../my_robot_perception/config/object_classes.yaml)，见 [感知说明](../my_robot_perception/README.md)。
 - 感知层启用时，规划器的 `objects_topic` 与深度节点输出一致；显式 launch 参数优先，否则使用感知 YAML 的值，会覆盖规划器 YAML 中的同名输入。关闭感知时则使用规划器 YAML，除非显式指定 `objects_topic`。
 - 执行器的抓放和命名动作名称会同步给任务规划器；规划器 YAML 中相应名称因此会被执行器配置或 launch 参数覆盖。`pick_place_action` 和旧别名 `action_name` 同时指定且不一致时会报错。
 - 为保持几何一致，规划器的 `reference_frame`、`end_effector_frame`、`tool_to_tcp` 由执行器配置（或相应 launch 参数）统一提供，可能覆盖规划器 YAML。三个分层由总入口启动时统一使用仿真时钟。
@@ -51,7 +52,8 @@ ros2 launch my_robot_bringup mujoco.launch.py --show-args
 | `moveit_controllers_file` | MoveIt 到轨迹控制器的映射 | 控制层和 motion 层的 MoveItConfigsBuilder |
 | `manipulation_config` | 抓放执行、TCP、运动配置 | `motion_control.launch.py` |
 | `planner_config` | 分拣策略、观察姿态、放置位置 | `motion_control.launch.py` |
-| `perception_config` | 颜色、深度过滤、话题和物块尺寸 | 总入口、控制层的相机配置、`perception.launch.py` |
+| `perception_config` | 图像/深度处理参数、话题及共享类别表路径 | 总入口、控制层的相机配置、`perception.launch.py` |
+| `class_config` | 可选覆盖类别、HSV 和各类标称尺寸 | `perception.launch.py` 统一传给两个节点 |
 
 `MoveItConfigsBuilder` 自动加载的 `kinematics.yaml`、`joint_limits.yaml`、`sensors_3d.yaml` 等默认来自安装的 MoveIt 配置包；它们不在上述六条路径内。修改这些源码配置后仍需重新构建或使用适当的符号链接安装，修改 Python/C++、URDF 等资源同样不能一概认为不需要构建。直接单独启动各层时，如果没有传路径，默认使用安装目录内的配置。
 
@@ -139,8 +141,8 @@ ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
 
 ## 总配置内的场景列表
 
-`mujoco_launch.yaml` 的 `scenes` 可按 red/green/blue 填写多个 `[x,y,z]`。默认不填或 `{}` 保留原三色；某颜色省略沿用默认，`[]` 清空该颜色。入口自动生成临时 XML，不需要独立场景 YAML 或手动生成步骤。显式 `scene_file` 仍优先；生成辅助源码在 `script/build/scene_config.py`，构建时安装到本包供启动链调用。见 [脚本说明](../../script/README.md#场景与一键启动)。
+`mujoco_launch.yaml` 的 `scenes` 按类别 ID 填写多个 `[x,y,z]`。未填写/null 使用类别表默认位置；显式映射仅生成列出的类别，`{}` 为空场景，某类别 `[]` 为零个。生成几何/尺寸来自同一类别表，未知类别跳过并报告。生成在所有参数声明后进行，确保显式 `class_config` 优先。入口自动生成临时 XML，不需要独立场景 YAML 或手动生成步骤。显式 `scene_file` 仍优先；生成辅助源码在 `script/build/scene_config.py`，构建时安装到本包供启动链调用。见 [脚本说明](../../script/README.md#场景与一键启动)。
 
 ## 放置规则参数
 
-`place_position_modes` 与 `place_positions` 可在总配置设置，或作为同名 launch 参数覆盖。启动层校验并传给 planner；不传给执行器做二次偏移。优先级为显式 launch 参数 > 总配置 > planner YAML > 节点默认。配置了显式规则时覆盖旧区域/槽位策略；没有规则保留旧策略。`dry_run:=true` 仅打印有效规则、不启动节点；脚本提供 `--dry-run`。见 [放置规则说明](../../script/README.md#放置坐标规则与优先级)。
+`place_position_modes` 与 `place_positions` 可在总配置设置，或作为同名 launch 参数覆盖。启动层校验并传给 planner；不传给执行器做二次偏移。优先级为显式 launch 参数 > 总配置 > planner YAML > 节点默认。配置了显式规则时覆盖旧区域/槽位策略；所有层均未提供规则才使用显式类别区域/槽位；缺少规则的类别不抓取。`dry_run:=true` 仅打印有效规则、不启动节点；脚本提供 `--dry-run`。见 [放置规则说明](../../script/README.md#放置坐标规则与优先级)。

@@ -7,13 +7,14 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
 import yaml
 
 
 # Empty overrides leave the corresponding value in perception.yaml unchanged.
 TOPIC_ARGUMENTS = {
     'image_topic': ('color_detector', 'RGB image input'),
-    'labels_topic': ('both', 'Color label image'),
+    'labels_topic': ('both', 'Class label image'),
     'debug_topic': ('color_detector', 'Color debug image'),
     'depth_topic': ('depth_localizer', 'Aligned depth image input'),
     'camera_info_topic': ('depth_localizer', 'Camera calibration input'),
@@ -27,8 +28,12 @@ def launch_setup(context):
         return LaunchConfiguration(name).perform(context)
 
     config = yaml.safe_load(Path(argument('perception_config')).read_text())
-    color = dict(config['color_detector']['ros__parameters'])
-    depth = dict(config['depth_localizer']['ros__parameters'])
+    shared = config.get('/**', {}).get('ros__parameters', {})
+    color = {**shared, **config['color_detector']['ros__parameters']}
+    depth = {**shared, **config['depth_localizer']['ros__parameters']}
+    for parameters in (color, depth):
+        parameters.update(perception_config=argument('perception_config'),
+                          class_config_override=argument('class_config'))
     for name, (target, _) in TOPIC_ARGUMENTS.items():
         value = argument(name)
         if value:
@@ -58,6 +63,8 @@ def generate_launch_description():
     arguments = [
         DeclareLaunchArgument('perception_config', default_value=str(perception / 'config/perception.yaml'),
                               description='Color and depth node parameters'),
+        DeclareLaunchArgument('class_config', default_value='',
+                              description='Shared class catalog; empty uses perception_config'),
         DeclareLaunchArgument('use_sim_time', default_value='true', choices=['true', 'false'],
                               description='Use ROS simulation time'),
         DeclareLaunchArgument('show_window', default_value='',

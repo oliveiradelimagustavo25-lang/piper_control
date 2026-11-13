@@ -80,6 +80,9 @@ def main():
             assert len(received[-1].objects)==2
             feed([(78,2)])
             assert received[-1].objects[0].tracking_uncertain
+            feed([(60,4)])
+            assert not received[-1].objects
+            assert 'undefined class 4' in received[-1].issues
             feed([(63,1),(100,1)], frame='missing_optical_frame', seconds=0.2)
             # 排空故障切换前在途的回调；随后故障帧不应产生空 objects。
             before=len(received)

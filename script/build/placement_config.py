@@ -1,9 +1,9 @@
-"""放置规则校验、YAML 优先级合并与 dry-run 描述；不进行物体坐标猜测。"""
+"""逐类别放置规则与 YAML 优先级；显式缺失规则不会回退旧坐标。"""
 import math
+import warnings
 
 import yaml
 
-COLORS = ('red', 'green', 'blue')
 KEYS = ('place_position_modes', 'place_positions')
 
 
@@ -14,56 +14,63 @@ def parameters(config):
         if not isinstance(modes, list) or len(modes) != 3 or any(m not in ('relative', 'absolute') for m in modes):
             raise ValueError('place_position_modes requires three X/Y/Z entries: relative or absolute')
         result['place_position_modes'] = modes
-    if 'place_positions' in config:
-        positions = config['place_positions']
-        if not isinstance(positions, dict) or set(positions) != set(COLORS):
-            raise ValueError('place_positions requires red, green and blue arrays; null/missing colors are not allowed')
-        for color in COLORS:
-            values = positions[color]
-            if (not isinstance(values, list) or len(values) != 3 or
-                    any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in values)):
-                raise ValueError(f'place_positions.{color} requires three finite center coordinates/offsets (not null)')
-            result['place_positions.' + color] = [float(v) for v in values]
+    if 'place_positions' not in config:
+        return result
+    result['use_position_rules'] = True
+    positions = config['place_positions']
+    if not isinstance(positions, dict):
+        warnings.warn('Ignoring invalid place_positions; no legacy fallback', stacklevel=2)
+        return result
+    for key, values in positions.items():
+        cid = str(key)
+        if (isinstance(key, bool) or not cid.isdigit() or not 1 <= int(cid) <= 255 or
+                sum(str(k).isdigit() and int(str(k)) == int(cid) for k in positions) != 1):
+            warnings.warn(f'Ignoring invalid/duplicate placement class {key!r}', stacklevel=2)
+            continue
+        if (not isinstance(values, list) or len(values) != 3 or
+                any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in values)):
+            warnings.warn(f'Ignoring placement class {cid}: expected three finite coordinates', stacklevel=2)
+            continue
+        result['place_positions.' + str(int(cid))] = [float(v) for v in values]
     return result
 
 
 def resolve(planner, modes_argument='', positions_argument=''):
-    """节点 YAML < 总配置（由 launch 默认参数传入）< 显式 launch 参数。"""
     result = dict(planner)
-    overrides = {}
-    for key, value in zip(KEYS, (modes_argument, positions_argument)):
-        if value:
-            overrides[key] = yaml.safe_load(value)
-    # 支持节点 YAML 的标准嵌套形式，也支持点分参数名。先合并高优先级值再校验。
-    has_nested = 'place_positions' in result
-    nested = result.pop('place_positions', None)
-    if has_nested and 'place_positions' not in overrides:
-        if not isinstance(nested, dict):
-            raise ValueError('Invalid planner place_positions mapping')
-        for color, value in nested.items():
-            result.setdefault('place_positions.' + color, value)
-    result.update(parameters(overrides))
-    effective = {}
-    if 'place_position_modes' in result:
-        effective['place_position_modes'] = result['place_position_modes']
-    if any('place_positions.' + color in result for color in COLORS):
-        effective['place_positions'] = {color: result.get('place_positions.' + color) for color in COLORS}
-    result.update(parameters(effective))
-    if 'place_positions' not in effective and any(m == 'relative' for m in result.get('place_position_modes', [])):
-        raise ValueError('Relative modes require explicit place_positions; legacy simulation points are not offsets')
+    positions = result.pop('place_positions', None)
+    present = 'place_positions' in planner or planner.get('use_position_rules', False) or any(k.startswith('place_positions.') for k in result)
+    if 'place_positions' not in planner and present:
+        positions = {k.split('.', 1)[1]: v for k, v in result.items() if k.startswith('place_positions.')}
+    if positions_argument:
+        positions = yaml.safe_load(positions_argument)
+        present = True
+    if present:
+        result = {k: v for k, v in result.items() if not k.startswith('place_positions.')}
+        result.update(parameters({'place_positions': positions}))
+    if modes_argument:
+        result['place_position_modes'] = yaml.safe_load(modes_argument)
+    result.update(parameters({k: result[k] for k in ('place_position_modes',) if k in result}))
+    if not present and any(m == 'relative' for m in result.get('place_position_modes', [])):
+        raise ValueError('Relative modes require explicit class placement rules')
     return result
 
 
-def describe(planner, frame):
-    if not any('place_positions.' + c in planner for c in COLORS):
-        return [f'Placement: legacy region/slots in {frame}; no place_positions override']
+def describe(planner, frame, catalog=None):
+    if not planner.get('use_position_rules'):
+        return [f'Placement: configured class regions/slots in {frame}']
     modes = planner.get('place_position_modes', ['absolute'] * 3)
     lines = [f'Placement frame: {frame}; X/Y/Z modes: {modes}']
-    for color in COLORS:
-        values = planner['place_positions.' + color]
+    for key, values in planner.items():
+        if not key.startswith('place_positions.'):
+            continue
+        cid = int(key.split('.')[1])
+        if catalog is not None and cid not in catalog:
+            lines.append(f'Ignored placement class {cid}: undefined in object_classes')
+            continue
         axes = [f'initial_{axis} {value:+g}' if mode == 'relative' else f'{value:g}'
                 for axis, value, mode in zip('xyz', values, modes)]
-        lines.append(f'{color} object center = [{", ".join(axes)}]')
+        lines.append(f'class {cid} object center = [{", ".join(axes)}]')
+    lines.append('Classes without an applicable placement rule are not picked; no legacy fallback.')
     if 'relative' in modes:
         lines.append('Relative targets need live observations; Planner prints frozen absolute targets before dispatch.')
     return lines

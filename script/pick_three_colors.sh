@@ -192,9 +192,12 @@ if [[ -z $sort_action ]] || ! kill -0 "$launch_pid" 2>/dev/null; then
     exit 1
 fi
 
-echo "正在通过 $sort_action 开始分拣；策略和颜色顺序使用任务规划器配置。"
-send_action "$sort_action" my_robot_interface/action/SortObjects '{}' '颜色分拣'
-echo '分拣任务已完成；完成判据使用 planner 的 placement_verification 配置。'
+echo "正在通过 $sort_action 开始分拣；策略和类别顺序使用任务规划器配置。"
+if send_action "$sort_action" my_robot_interface/action/SortObjects '{}' '类别分拣'; then
+    echo '本批可处理目标已完成；请同时查看场景生成跳过项，完成判据使用 planner 的 placement_verification 配置。'
+else
+    echo '本批任务未全部完成，请查看核验、跳过和感知问题汇总；仿真保留供检查。' >&2
+fi
 echo '仿真保持运行，按 Ctrl+C 退出。'
 if ! wait "$launch_pid"; then
     echo '仿真启动进程异常退出，请检查上方日志。' >&2

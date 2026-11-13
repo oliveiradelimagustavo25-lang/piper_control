@@ -1,10 +1,11 @@
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <tuple>
 #include <functional>
 #include <memory>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -26,6 +27,8 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <my_robot_perception/object_catalog.hpp>
+
 class DepthLocalizer : public rclcpp::Node
 {
   using Image = sensor_msgs::msg::Image;
@@ -44,21 +47,15 @@ public:
       "points_topic", "/perception/object_points");
     target_frame_ = declare_parameter<std::string>("target_frame", "");
     objects_frame_ = declare_parameter<std::string>("objects_frame", "base_link");
-    const auto dimensions = declare_parameter<std::vector<double>>(
-      "object_dimensions", {0.01, 0.01, 0.01});
+    classes_ = my_robot_perception::loadCatalog(*this);
     top_tolerance_ = declare_parameter<double>("top_surface_tolerance", 0.002);
     tf_timeout_ = declare_parameter<double>("tf_timeout", 0.1);
-    if (objects_frame_.empty() || dimensions.size() != 3 ||
-      !std::all_of(dimensions.begin(), dimensions.end(),
-      [](double value) { return std::isfinite(value) && value > 0; }) ||
+    if (objects_frame_.empty() ||
       !std::isfinite(top_tolerance_) || top_tolerance_ <= 0 ||
       !std::isfinite(tf_timeout_) || tf_timeout_ < 0)
     {
-      throw std::invalid_argument("Invalid object frame, dimensions or top surface tolerance");
+      throw std::invalid_argument("Invalid object frame or top surface tolerance");
     }
-    dimensions_.x = dimensions[0];
-    dimensions_.y = dimensions[1];
-    dimensions_.z = dimensions[2];
     match_distance_ = declare_parameter<double>("track_match_distance", 0.025);
     ambiguity_margin_ = declare_parameter<double>("track_ambiguity_margin", 0.003);
     if (!std::isfinite(match_distance_) || match_distance_ <= 0 ||
@@ -113,14 +110,14 @@ private:
   {
     // ID 只在首次出现时分配。相机离开观察位或漏检不会注销历史轨迹。
     std::sort(objects.begin(), objects.end(), [](const Object & a, const Object & b) {
-      return std::tie(a.color, a.pose.position.x, a.pose.position.y) <
-             std::tie(b.color, b.pose.position.x, b.pose.position.y);
+      return std::tie(a.class_id, a.pose.position.x, a.pose.position.y) <
+             std::tie(b.class_id, b.pose.position.x, b.pose.position.y);
     });
     struct Match {double distance; size_t detection, track;};
     std::vector<Match> matches;
     for (size_t i = 0; i < objects.size(); ++i) {
       for (size_t j = 0; j < tracks_.size(); ++j) {
-        if (objects[i].color != tracks_[j].color) {continue;}
+        if (objects[i].class_id != tracks_[j].class_id) {continue;}
         const auto & a = objects[i].pose.position;
         const auto & b = tracks_[j].pose.position;
         const double d = std::hypot(std::hypot(a.x - b.x, a.y - b.y), a.z - b.z);
@@ -146,13 +143,14 @@ private:
       // 歧义时不把猜测位置写回身份记录，等待分离后的新观测。
       if (!object.tracking_uncertain) {tracks_[match.track] = object;}
     }
-    const std::array<std::string, 4> names{"", "red", "green", "blue"};
     for (size_t i = 0; i < objects.size(); ++i) {
       if (assigned[i]) {continue;}
       auto & object = objects[i];
       object.tracking_uncertain = std::any_of(matches.begin(), matches.end(),
         [i](const Match & match) {return match.detection == i;});
-      object.object_id = names[object.color] + "_" + std::to_string(++next_id_[object.color]);
+      const auto definition = std::find_if(classes_.begin(), classes_.end(),
+        [&](const auto & entry) {return entry.id == object.class_id;});
+      object.object_id = definition->name + "_" + std::to_string(++next_id_[object.class_id]);
       if (!object.tracking_uncertain) {tracks_.push_back(object);}
     }
   }
@@ -199,10 +197,26 @@ private:
       const auto labels = cv_bridge::toCvShare(labels_msg, "mono8");
       const auto depth = cv_bridge::toCvShare(depth_msg, depth_msg->encoding);
       std::vector<cv::Point3f> points;
-      std::vector<uint8_t> colors;
+      std::vector<uint8_t> class_ids;
       my_robot_interface::msg::DetectedObjectArray objects;
       objects.header = labels_msg->header;
       objects.header.frame_id = objects_frame_;
+      const auto issue = [&](const std::string & reason) {
+        if (std::find(objects.issues.begin(), objects.issues.end(), reason) == objects.issues.end()) {
+          objects.issues.push_back(reason);
+        }
+      };
+      std::set<int> present;
+      for (int row = 0; row < labels->image.rows; ++row) {
+        const auto * pixels = labels->image.ptr<uint8_t>(row);
+        for (int col = 0; col < labels->image.cols; ++col) {if (pixels[col]) {present.insert(pixels[col]);}}
+      }
+      for (const auto id : present) {
+        if (std::none_of(classes_.begin(), classes_.end(), [id](const auto & c) {return c.id == id;})) {
+          issue("undefined class " + std::to_string(id));
+        }
+      }
+      if (classes_.empty()) {issue("no valid class definitions");}
       tf2::Transform camera_to_objects;
       camera_to_objects.setIdentity();
       bool objects_tf_ready = true;
@@ -218,8 +232,14 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
           "Object center TF unavailable: %s", error.what());
       }
-      for (int color = 1; color <= 3; ++color) {
-        cv::Mat mask = labels->image == color;
+      for (const auto & definition : classes_) {
+        if (!present.count(definition.id)) {continue;}
+        const auto class_name = "class " + std::to_string(definition.id);
+        if (definition.geometry != "box") {
+          issue(class_name + ": localization unsupported for " + definition.geometry);
+          continue;
+        }
+        cv::Mat mask = labels->image == definition.id;
         if (erosion_size_ > 1) {
           cv::erode(mask, mask, cv::getStructuringElement(
             cv::MORPH_ELLIPSE, {erosion_size_, erosion_size_}));
@@ -243,6 +263,7 @@ private:
             }
           }
           if (depths.size() < static_cast<size_t>(min_pixels_)) {
+            issue(class_name + ": insufficient valid depth");
             continue;
           }
           const float center_depth = median(depths);
@@ -257,6 +278,7 @@ private:
             }
           }
           if (inliers.size() < static_cast<size_t>(min_pixels_)) {
+            issue(class_name + ": insufficient depth inliers");
             continue;
           }
           uv *= 1.0 / inliers.size();
@@ -267,9 +289,9 @@ private:
             distorted ? cv::Mat(info_->d) : cv::Mat());
           const float z = median(inliers);
           points.emplace_back(ray[0].x * z, ray[0].y * z, z);
-          colors.push_back(static_cast<uint8_t>(color));
+          class_ids.push_back(static_cast<uint8_t>(definition.id));
 
-          // 每个独立连通区域生成一个已知尺寸的平放物块。
+          // 类别图由任意检测器提供；当前几何方法处理已知尺寸的平放 box。
           const int area = stats.at<int>(id, cv::CC_STAT_AREA);
           if (objects_tf_ready) {
             std::vector<cv::Point2d> rays;
@@ -296,18 +318,23 @@ private:
                 top_heights.push_back(point.z());
               }
             }
-            RCLCPP_DEBUG(get_logger(), "color=%d area=%d surface=%zu top=%zu upper_z=%.5f",
-              color, area, surface.size(), top_heights.size(), upper_z);
+            RCLCPP_DEBUG(get_logger(), "class=%u area=%d surface=%zu top=%zu upper_z=%.5f",
+              definition.id, area, surface.size(), top_heights.size(), upper_z);
             if (top_heights.size() >= static_cast<size_t>(min_pixels_)) {
               my_robot_interface::msg::DetectedObject object;
-              object.color = color;
-              object.dimensions = dimensions_;
+              object.class_id = definition.id;
+              object.color = definition.color;
+              object.dimensions.x = definition.dimensions[0];
+              object.dimensions.y = definition.dimensions[1];
+              object.dimensions.z = definition.dimensions[2];
               object.pose.position.x = (lower.x() + upper.x()) / 2;
               object.pose.position.y = (lower.y() + upper.y()) / 2;
               // objects_frame 的 Z 轴向上；上表面高度减半高得到物体中心。
-              object.pose.position.z = median(top_heights) - dimensions_.z / 2;
+              object.pose.position.z = median(top_heights) - object.dimensions.z / 2;
               object.pose.orientation.w = 1.0;
               objects.objects.push_back(object);
+            } else {
+              issue(class_name + ": insufficient top surface");
             }
           }
         }
@@ -316,6 +343,10 @@ private:
       // TF 故障不是空场景；不更新身份，也不发布可被误判为清场的空列表。
       if (objects_tf_ready) {
         associate(objects.objects);
+        if (!objects.issues.empty()) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+            "Incomplete perception: %s", objects.issues.front().c_str());
+        }
         objects_pub_->publish(objects);
       }
 
@@ -354,7 +385,7 @@ private:
           *x = points[i].x;
           *y = points[i].y;
           *z = points[i].z;
-          *label = colors[i];
+          *label = class_ids[i];
         }
       }
       // 无有效物块时发布空点云，表示本帧无检测结果。
@@ -369,10 +400,10 @@ private:
   }
 
   std::vector<Object> tracks_;
-  std::array<uint64_t, 4> next_id_{};
+  std::map<uint16_t, uint64_t> next_id_;
+  std::vector<my_robot_perception::ObjectClass> classes_;
   double match_distance_, ambiguity_margin_;
   std::string target_frame_, objects_frame_;
-  geometry_msgs::msg::Vector3 dimensions_;
   double min_depth_, max_depth_, depth_tolerance_, top_tolerance_, tf_timeout_;
   int min_pixels_, erosion_size_;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr info_;

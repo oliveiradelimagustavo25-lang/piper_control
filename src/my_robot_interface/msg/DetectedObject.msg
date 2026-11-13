@@ -4,7 +4,8 @@ uint8 GREEN=2
 uint8 BLUE=3
 
 string object_id
+uint16 class_id                     # 类别表编号；与实例 ID、分拣颜色分开
 uint8 color
 geometry_msgs/Pose pose             # 物体几何中心
 geometry_msgs/Vector3 dimensions    # 物体自身坐标系尺寸，m
-bool tracking_uncertain            # 同色关联有歧义；等待后续观测，不据此重置重试次数
+bool tracking_uncertain            # 同类关联有歧义；等待后续观测，不据此重置重试次数

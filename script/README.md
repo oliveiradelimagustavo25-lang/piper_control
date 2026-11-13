@@ -10,7 +10,7 @@ colcon build
 ./script/pick_three_colors.sh --ros-domain-id 227
 ```
 
-脚本读取工作区的 `config/mujoco_launch.yaml`，加载环境、检查 ROS 域并启动 `mujoco.launch.py`；总入口启动仿真、MoveIt、任务规划器和感知节点。脚本等待机械臂控制器与命名姿态 Action 就绪，发送 `pose_1` 目标；到位后自动发送一次分拣任务，使用 `task_planner.yaml` 中的默认策略和颜色顺序。任务完成后仿真继续运行；如果动作或分拣失败，脚本会显示结果并退出。
+脚本读取工作区的 `config/mujoco_launch.yaml`，加载环境、检查 ROS 域并启动 `mujoco.launch.py`；总入口启动仿真、MoveIt、任务规划器和感知节点。脚本等待机械臂控制器与命名姿态 Action 就绪，发送 `pose_1` 目标；到位后自动发送一次分拣任务，使用 `task_planner.yaml` 中的默认策略和颜色顺序。任务完成后仿真继续运行；命名姿态失败会退出；分拣部分失败会显示汇总并保留仿真。
 
 直接使用 `ros2 launch my_robot_bringup mujoco.launch.py` 不会自动开始分拣。需要手动触发时，在同一 ROS 域的另一终端发送目标：
 
@@ -19,10 +19,10 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 export ROS_DOMAIN_ID=227
 ros2 action send_goal --feedback /sorting/sort_objects my_robot_interface/action/SortObjects \
-  '{strategy: color_order, color_order: [1, 2, 3]}'
+  '{strategy: class_order, class_order: [1, 2, 3]}'
 ```
 
-规划器收到分拣目标后会按自身配置再次到观察位 `pose_1`，等待新图像，再按默认红、绿、蓝顺序执行抓放。Action 完成表示运动序列完成，物块最终位置仍需视觉核验。脚本会读取任务规划器实际配置的 Action 名称；手动调用时，如用 `sort_action` 覆盖了名称，也应使用新名称。已有分拣任务在执行时，不要同时发送重复目标。
+规划器收到分拣目标后会按自身配置再次到观察位 `pose_1`，等待新图像，再按配置的类别优先级执行抓放。Action 完成表示运动序列完成，物块最终位置仍需视觉核验。脚本会读取任务规划器实际配置的 Action 名称；手动调用时，如用 `sort_action` 覆盖了名称，也应使用新名称。已有分拣任务在执行时，不要同时发送重复目标。
 
 ```bash
 # 将 -- 后的参数传给 mujoco.launch.py
@@ -106,51 +106,44 @@ kill -KILL <PID>
 ./script/pick_three_colors.sh
 ```
 
-总配置中的 `scenes` 按颜色填写坐标，每个 `[x, y, z]` 生成一个原有模型尺寸的物块（m）：
+总配置中的 `scenes` 按共同类别表的 ID 填写位置（m，世界坐标），每个数组是一个实例：
 
 ```yaml
 scenes:
-  red: [[0.32, -0.12, 0.03], [0.32, -0.06, 0.03], [0.32, 0.0, 0.03]]
-  green: [[0.32, 0.06, 0.03]]
-  blue: [[0.32, 0.12, 0.03]]
+  1: [[0.32, -0.12, 0.03], [0.32, -0.04, 0.03]]
+  2: [[0.32, 0.04, 0.03]]
+  3: []
 ```
 
-数量由列表长度决定，不需要另外创建场景配置文件或 XML。四个绿色也只需填写四个绿色坐标，同时将 `red`、`blue` 设为 `[]`。
+- 不写 `scenes` 或为 `null`：使用类别表 `simulation.default_position` 定义的默认实例，当前为三色各一。
+- 显式映射只生成列出的类别；`{}` 是空场景，某类别 `[]` 为零个，不会暗中补齐其他类别。
+- 未定义类别、无效位置或暂不支持的模型只跳过自身，打印原因；不把 ID 猜成其他模型。
+- 显式 `scene_file` 优先于自动生成。
 
-- 不写 `scenes`、写 `{}` 或 `null`：使用原有默认三色。
-- 某颜色未写或为 `null`：沿用该颜色默认一个物块。
-- 某颜色为 `[]`：不生成该颜色。
-- 显式传入 `scene_file`（命令行优先，其次总配置）时，使用该世界文件。
+启动链在所有参数覆盖完成后读取有效类别表，调用现有 [scene_config.py](build/scene_config.py) 生成 XML。几何和尺寸来自 `object_classes.yaml`，当前支持 box、cylinder、sphere 的 MuJoCo 生成；圆柱尺寸约定为 `[直径, 直径, 高]`，不表示当前 CV/depth 已支持圆柱识别抓取。`simulation.mass` 默认 0.001 kg，`simulation.rgba` 可选覆盖外观。
 
-启动链自动调用 [script/build/scene_config.py](build/scene_config.py)，在临时目录生成 `objects.xml` 和 `scene.xml`，退出时自动清理；直接用 `ros2 launch ... launch_config:=...` 也支持相同规则。`script/build/` 的辅助 Python 源码已纳入版本管理范围，缓存和运行产物仍忽略。这里的 build 是脚本辅助目录，与 colcon 的根目录 `build/` 不同。
-
-场景列表只定义仿真输入；planner 按实际观测工作。各色放置区域、原点与间距定义放置容量，不再要求按物体数量手写坐标列表。配置与异常处理见 [planner 说明](../src/my_robot_planner/README.md)。中途增删不在本轮 MuJoCo 改造范围内。
+临时目录包含 `scene_report.json`，分别记录请求数、生成数和跳过原因，退出时清理；启动日志也打印汇总。生成器使用 Python 读取同一 YAML，不另建类别表。场景数量不传给 Planner，后者按实际观测选择目标。中途增删和聚集/统一放置不在本轮范围。
 
 ## 放置坐标规则与优先级
 
-在 `config/mujoco_launch.yaml` 配置：
-
 ```yaml
-place_position_modes: [relative, relative, relative]  # 按 X/Y/Z，不是按颜色
+place_position_modes: [relative, relative, relative]  # X/Y/Z
 place_positions:
-  red: [-0.050, -0.010, 0.0005]
-  green: [-0.050, -0.010, 0.0005]
-  blue: [-0.050, -0.010, 0.0005]
+  1: [-0.050, -0.010, 0.0005]
+  2: [-0.050, -0.010, 0.0005]
+  3: [-0.050, -0.010, 0.0005]
 ```
 
-在执行器统一的 `reference_frame`（当前 `base_link`）中逐轴计算。relative 是物体首次派发前观测中心加偏移，absolute 是直接使用给定中心坐标；重试更新抓取位置，放置目标冻结，不反复累加。全 absolute 表示每色固定绝对中心。相对规则不会自动聚集或把同色物体压到统一位置。
+键是类别 ID；整数键和字符串数字等价，可不连续。只填写需要处理的类别。未定义类别的规则被忽略；规则缺失、null 或数组无效的类别在抓取前跳过，不回退其他类别或旧仿真坐标。表中存在但场景未出现的类别不会阻塞。
 
-Z 始终是物体中心/中心偏移，不是桌面高度或 TCP。桌面 -0.145 m、方块高 0.05 m 时理论中心是 -0.120 m。模式 `[relative, absolute, absolute]`、红色 `[-0.24,-0.06,-0.12]` 表示 `[首次派发x-0.24,-0.06,-0.12]`，不是三个方向都相加。
+优先级：**显式 launch 参数 > 总 YAML > planner YAML**。高优先级 `place_positions` 整体替换低优先级规则，缺失项不会从低层补回。显式 `{}` 表示不启用任何目标抓取；所有层都未提供 `place_positions` 时，才使用 Planner 中 `classes.<id>.place_position/place_region/place_slots` 的显式配置，没有硬编码默认放置点。
 
-优先级为：**显式 launch 参数 > 总配置对应字段 > planner YAML > 节点默认值**。`--planner-config` 选择基础 planner YAML，不能覆盖总配置里已经显式填写的放置规则。模式和值分别按优先级合并；省略模式使用低优先级模式，默认全 absolute。
-
-显式 `place_positions` 一旦生效，就覆盖旧的 `<color>.place_position/place_region/place_slots` 选择策略，不与其生成位置混用。删除总配置两项后仍会读取 planner YAML；若各层均没有新 `place_positions`，才使用原区域/槽位策略。三色数组必须完整、每个是三个有限数字；null、缺色、错误长度直接在启动校验中报错，不能静默套用旧仿真值。
+relative 使用物体首次派发前在 `reference_frame`（当前 base_link）中的中心加偏移，重试只刷新抓取位置，绝对放置目标冻结。新 SortObjects 任务重新建立基准。absolute 直接使用给定中心。Z 是物体中心或中心偏移，不是桌面或 TCP；例如桌面 -0.145 m、物高 0.05 m 的中心为 -0.120 m。混合模式 `[relative, absolute, absolute]` 和 `[-0.24,-0.06,-0.12]` 得到 `[首次x-0.24,-0.06,-0.12]`。
 
 ```bash
-# 只显示有效规则，不检查空闲域，不启动仿真、节点或动作
 ./script/pick_three_colors.sh --dry-run
-# 命令行按轴覆盖总配置中的模式；值仍来自总配置
 ./script/pick_three_colors.sh --dry-run -- 'place_position_modes:=[relative, absolute, absolute]'
+./script/pick_three_colors.sh --dry-run -- 'place_positions:={1: [-0.05, -0.01, 0.0005]}'
 ```
 
-相对 dry-run 缺少实时物体位置，只打印规则；最终绝对目标由 Planner 首次派发前计算并打印。完整覆盖值也可传 `place_positions:={red: [...], green: [...], blue: [...]}`。目标被占用或不可达时按现有等待/错误策略处理，本次不自动扩展为聚集或统一放置。
+相对 dry-run 只显示规则；最终绝对目标见 Planner 的 `Frozen placement` 日志。多个绝对目标重合、目标被占用或不可达时仍按现有策略处理，不强行重叠。跳过的可靠三维物体仍参与放置占用和 MoveIt 障碍检查。

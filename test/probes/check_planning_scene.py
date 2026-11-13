@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+import yaml
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -30,6 +31,8 @@ class SceneCheck(Node):
     def __init__(self, process, objects_topic):
         super().__init__('mujoco_scene_check')
         self.process = process
+        catalog = yaml.safe_load((ROOT/'src/my_robot_perception/config/object_classes.yaml').read_text())['classes']
+        self.dimensions = next(c['geometry']['dimensions'] for c in catalog if c['id'] == 1)
         self.get_scene = self.create_client(GetPlanningScene, '/get_planning_scene')
         self.apply_scene = self.create_client(ApplyPlanningScene, '/apply_planning_scene')
         self.validity = self.create_client(GetStateValidity, '/check_state_validity')
@@ -66,10 +69,10 @@ class SceneCheck(Node):
         message.header.frame_id = 'base_link'
         # Zero timestamp denotes a static test observation, independent of simulation time.
         obj = DetectedObject()
-        obj.object_id, obj.color = object_id, 1
+        obj.object_id, obj.color, obj.class_id = object_id, 1, 1
         obj.pose.position.x, obj.pose.position.y, obj.pose.position.z = x, y, z
         obj.pose.orientation.w = 1.0
-        obj.dimensions.x = obj.dimensions.y = obj.dimensions.z = 0.01
+        obj.dimensions.x, obj.dimensions.y, obj.dimensions.z = self.dimensions
         message.objects = [obj]
         # The planner and executor subscribe independently; both must see the test observation.
         self.wait(lambda: self.objects.get_subscription_count() >= 2, 15, '视觉物块订阅者')
@@ -124,10 +127,10 @@ class SceneCheck(Node):
         msg = DetectedObjectArray()
         msg.header.frame_id = 'base_link'
         valid = DetectedObject()
-        valid.object_id, valid.color = 'scene_probe_cube', 1
+        valid.object_id, valid.color, valid.class_id = 'scene_probe_cube', 1, 1
         valid.pose.position.x, valid.pose.position.y, valid.pose.position.z = 0.30, 0.24, 0.05
         valid.pose.orientation.w = 1.0
-        valid.dimensions.x = valid.dimensions.y = valid.dimensions.z = 0.01
+        valid.dimensions.x, valid.dimensions.y, valid.dimensions.z = self.dimensions
         bad_size, bad_pose = copy.deepcopy(valid), copy.deepcopy(valid)
         bad_size.object_id, bad_size.dimensions.x = 'invalid_size', -0.01
         bad_pose.object_id, bad_pose.pose.orientation.w = 'invalid_pose', 0.0
@@ -174,7 +177,7 @@ class SceneCheck(Node):
         print('通过：障碍加入后碰撞、移除后恢复', flush=True)
 
     def check_attachment(self, cancel=False):
-        obj = self.publish_object('red_cube', 0.32, -0.08, 0.005)
+        obj = self.publish_object('red_cube', 0.32, -0.08, self.dimensions[2] / 2)
         goal = PickPlace.Goal()
         goal.object_id = obj.object_id
         goal.object_pose.header.frame_id = 'base_link'
@@ -182,7 +185,7 @@ class SceneCheck(Node):
         goal.object_dimensions = obj.dimensions
         goal.place_pose.header.frame_id = 'base_link'
         goal.place_pose.pose.position.x, goal.place_pose.pose.position.y = 0.26, -0.06
-        goal.place_pose.pose.position.z, goal.place_pose.pose.orientation.w = 0.005, 1.0
+        goal.place_pose.pose.position.z, goal.place_pose.pose.orientation.w = self.dimensions[2] / 2, 1.0
 
         self.wait(self.pick.server_is_ready, 30, '抓放接口')
         sent = self.pick.send_goal_async(goal)

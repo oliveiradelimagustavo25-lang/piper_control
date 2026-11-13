@@ -11,11 +11,15 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    config = str(Path(get_package_share_directory('my_robot_perception')) / 'config/perception.yaml')
+    config = Path(get_package_share_directory('my_robot_perception')) / 'config/perception.yaml'
     return LaunchDescription([
-        DeclareLaunchArgument('perception_config', default_value=config),
+        DeclareLaunchArgument('perception_config', default_value=str(config)),
+        DeclareLaunchArgument('class_config', default_value=''),
         DeclareLaunchArgument('use_sim_time', default_value='true', choices=['true', 'false']),
         Node(package='my_robot_perception', executable='color_detector', output='screen',
-             parameters=[LaunchConfiguration('perception_config'),
-                         {'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)}]),
+             parameters=[LaunchConfiguration('perception_config'), {
+                 'perception_config': LaunchConfiguration('perception_config'),
+                 'class_config_override': ParameterValue(LaunchConfiguration('class_config'), value_type=str),
+                 'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
+             }]),
     ])

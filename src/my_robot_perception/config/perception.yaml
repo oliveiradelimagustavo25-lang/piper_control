@@ -1,3 +1,8 @@
+/**:
+  ros__parameters:
+    # 相对于本文件；两个节点共用这一份表。launch 的 class_config 参数可统一覆盖。
+    class_config: object_classes.yaml
+
 color_detector:
   ros__parameters:
     image_topic: /camera_sensor/image_raw
@@ -6,19 +11,11 @@ color_detector:
     show_window: false
     publish_debug: true
 
-    # 面积单位为像素；1 cm 小物块先使用较低阈值。
+    # 面积单位为像素；阈值保留对远处小区域的检测，不代表物体实际尺寸。
     min_area: 12
     max_area: 100000
-    morphology_kernel: 3        # 奇数；1 表示不做形态学处理
-
-    # OpenCV HSV：H=0~179，S/V=0~255。
-    # H 下界大于上界表示跨越色相零点，适用于红色。
-    red.lower: [170, 100, 50]
-    red.upper: [10, 255, 255]
-    green.lower: [35, 80, 50]
-    green.upper: [85, 255, 255]
-    blue.lower: [90, 80, 50]
-    blue.upper: [135, 255, 255]
+    opening_kernel: 3           # 先腐蚀后膨胀，去除小噪点；正奇数，1 表示关闭
+    closing_kernel: 5           # 先膨胀后腐蚀，连接小断裂；过大会合并相邻同色物体
 
 depth_localizer:
   ros__parameters:
@@ -30,8 +27,7 @@ depth_localizer:
     target_frame: ""             # 空字符串：相机光学系；可改为 base_link
     objects_topic: /perception/objects
     objects_frame: base_link     # Z 轴向上的坐标系，物体中心位姿使用此坐标系
-    object_dimensions: [0.01, 0.01, 0.01]  # 当前三色物块的已知尺寸，m
-    track_match_distance: 0.025  # m，同色物体跨帧匹配；不是物理身份保证
+    track_match_distance: 0.025  # m，同类物体跨帧匹配；不是物理身份保证
     track_ambiguity_margin: 0.003 # m，近似等距的对应关系标记为不确定
     top_surface_tolerance: 0.002 # 上部点的高度容差，m；要求物块平放且顶部可见
     tf_timeout: 0.1              # s，等待采集时刻的 TF 到达，避免图像略早于关节 TF

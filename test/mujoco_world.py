@@ -36,9 +36,10 @@ def check_scene(model):
     for _ in range(1000):
         mujoco.mj_step(model, data)
     heights = data.xpos[bodies, 2]
+    half_heights = model.geom_size[model.body_geomadr[bodies], 2]
     speeds = np.linalg.norm(data.cvel[bodies, 3:], axis=1)
     if (not np.isfinite(data.qpos).all() or
-            not np.all((heights > 0.004) & (heights < 0.006)) or np.any(speeds > 0.01)):
+            not np.allclose(heights, half_heights, atol=0.001) or np.any(speeds > 0.01)):
         raise ValueError(f'物块未落稳：高度 {heights}，速度 {speeds}')
     print(f'场景检查通过：3 个物块已落地，相机垂直视场 {model.cam_fovy[camera]:.2f}°。')
 

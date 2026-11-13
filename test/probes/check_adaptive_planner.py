@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def obj(name, color, x, y, z=0.005):
     o = DetectedObject()
-    o.object_id, o.color = name, color
+    o.object_id, o.color, o.class_id = name, color, color
     o.pose.position.x, o.pose.position.y, o.pose.position.z = x, y, z
     o.pose.orientation.w = 1.0
     o.dimensions.x = o.dimensions.y = o.dimensions.z = 0.01
@@ -41,6 +41,7 @@ class FakeCell(Node):
         self.recoveries = 0
         self.recovery_fails = False
         self.frame_count = 0
+        self.issues = []
         self.group = ReentrantCallbackGroup()
         self.publisher = self.create_publisher(DetectedObjectArray, '/verification/objects', 10)
         self.create_timer(0.03, self.publish, callback_group=self.group)
@@ -59,6 +60,7 @@ class FakeCell(Node):
         with self.lock:
             self.frame_count += 1
             msg.objects = copy.deepcopy(self.scene)
+            msg.issues = list(self.issues)
         self.publisher.publish(msg)
 
     def move_named(self, handle):
@@ -131,14 +133,14 @@ def stop(process):
             process.wait()
 
 
-def run_case(cell, name, scene, behavior=None, overrides=None, expected=None, cancel_when=None, colors=None):
+def run_case(cell, name, scene, behavior=None, overrides=None, expected=None, cancel_when=None, colors=None, issues=None, legacy_colors=None):
     params = dict(objects_topic='/verification/objects', observation_target='',
                   end_effector_frame='base_link', observation_settle_time=0.02,
                   idle_timeout=0.35, verification_timeout=0.25, slot_tolerance=0.01,
                   max_observation_age=1.0)
-    params.update({'red.place_slots': [0.26, -0.06, 0.005, 0.34, -0.06, 0.005],
-                   'green.place_slots': [0.26, 0.0, 0.005, 0.34, 0.0, 0.005],
-                   'blue.place_slots': [0.26, 0.06, 0.005, 0.34, 0.06, 0.005]})
+    params.update({'classes.1.place_slots': [0.26, -0.06, 0.005, 0.34, -0.06, 0.005],
+                   'classes.2.place_slots': [0.26, 0.0, 0.005, 0.34, 0.0, 0.005],
+                   'classes.3.place_slots': [0.26, 0.06, 0.005, 0.34, 0.06, 0.005]})
     for key, value in (overrides or {}).items():
         if value is None:
             params.pop(key, None)
@@ -152,6 +154,7 @@ def run_case(cell, name, scene, behavior=None, overrides=None, expected=None, ca
         cell.scene, cell.calls = copy.deepcopy(scene), []
         cell.behavior = behavior or (lambda goal, attempt: 'success')
         cell.pending, cell.recoveries, cell.frame_count = None, 0, 0
+        cell.issues = list(issues or [])
     with log.open('w') as output:
         process = subprocess.Popen([str(ROOT / 'install/my_robot_planner/lib/my_robot_planner/task_planner'),
                                     '--ros-args', '--params-file', str(config)],
@@ -159,7 +162,9 @@ def run_case(cell, name, scene, behavior=None, overrides=None, expected=None, ca
         try:
             wait(cell.client.server_is_ready, 10, process)
             goal = SortObjects.Goal()
-            goal.color_order = colors or []
+            goal.class_order = colors or []
+            if legacy_colors is not None:
+                goal.color_order = legacy_colors
             sent = cell.client.send_goal_async(goal)
             wait(sent.done, 5, process)
             handle = sent.result()
@@ -250,7 +255,7 @@ def main():
                             cancel_when=lambda _: cell.frame_count >= 30)
         assert not calls
         calls, _ = run_case(cell, 'full_wait', [red, obj('blocker', 2, 0.26, -0.06)], colors=[1], overrides={
-            'red.place_slots': [0.26, -0.06, 0.005]},
+            'classes.1.place_slots': [0.26, -0.06, 0.005]},
             cancel_when=lambda _: cell.frame_count >= 30 and not cell.calls)
         assert not calls
         for policy, expected_order in [('priority', ['red_2', 'red_1', 'red_2']),
@@ -269,7 +274,7 @@ def main():
         cell.recovery_fails = False
         planner = yaml.safe_load((ROOT/'src/my_robot_planner/config/task_planner.yaml').read_text())['task_planner']['ros__parameters']
         region = {k:v for k,v in planner.items() if k.endswith(('.place_region','.place_position')) or k=='placement_step'}
-        region.update({c+'.place_slots':None for c in ['red','green','blue']})
+        region.update({'classes.'+str(c)+'.place_slots':None for c in [1,2,3]})
         for counts in [(0,4,0),(3,1,1),(4,0,0),(0,0,4)]:
             objects=[]
             for color,n in enumerate(counts,1):
@@ -279,16 +284,16 @@ def main():
             calls,_=run_case(cell,'region_'+'_'.join(map(str,counts)),objects,overrides=region,expected=True)
             assert len(calls)==sum(counts), (counts,len(calls))
         relative={'place_position_modes':['relative']*3,
-                  **{'place_positions.'+c:[-0.05,-0.01,0.0005] for c in ['red','green','blue']}}
+                  **{'place_positions.'+str(c):[-0.05,-0.01,0.0005] for c in [1,2,3]}}
         calls,_=run_case(cell,'relative_xyz',[red],overrides=relative,expected=True)
         p=calls[0].place_pose.pose.position
         assert len(calls)==1 and abs(p.x-0.27)<1e-9 and abs(p.y+0.13)<1e-9 and abs(p.z-0.0055)<1e-9
         mixed={**relative,'place_position_modes':['relative','absolute','absolute'],
-               'place_positions.red':[-0.05,-0.06,-0.12]}
+               'place_positions.1':[-0.05,-0.06,-0.12]}
         calls,_=run_case(cell,'mixed_xyz',[red],overrides=mixed,expected=True)
         p=calls[0].place_pose.pose.position
         assert abs(p.x-0.27)<1e-9 and p.y==-0.06 and p.z==-0.12
-        absolute={**mixed,'place_position_modes':['absolute']*3,'place_positions.red':[0.26,-0.06,-0.12]}
+        absolute={**mixed,'place_position_modes':['absolute']*3,'place_positions.1':[0.26,-0.06,-0.12]}
         calls,_=run_case(cell,'absolute_xyz',[red],overrides=absolute,expected=True)
         p=calls[0].place_pose.pose.position
         assert p.x==0.26 and p.y==-0.06 and p.z==-0.12
@@ -302,12 +307,68 @@ def main():
         assert len(calls)==1
         calls,_=run_case(cell,'relative_multi',[red,obj('red_2',1,0.32,-0.04),green],overrides=relative,expected=True)
         assert len(calls)==3 and len({(g.place_pose.pose.position.x,g.place_pose.pose.position.y) for g in calls})==3
-        zero={**relative,**{'place_positions.'+c:[0.0,0.0,0.0] for c in ['red','green','blue']}}
+        zero={**relative,**{'place_positions.'+str(c):[0.0,0.0,0.0] for c in [1,2,3]}}
         calls,_=run_case(cell,'relative_zero',[red],overrides=zero,expected=True)
         assert not calls
         calls,_=run_case(cell,'relative_blocked',[red,obj('blocker',2,0.27,-0.13)],overrides=relative,colors=[1],
                          cancel_when=lambda _:cell.frame_count>=30 and not cell.calls)
         assert not calls
+        # 类别引用/放置规则不完整时，仍处理有完整规则的目标，不回退旧槽位。
+        partial={'place_position_modes':['relative']*3,'place_positions.1':[-0.05,-0.01,0.0005]}
+        calls,outcome=run_case(cell,'missing_class_rule',[red,green],overrides=partial,expected=False)
+        assert [g.object_id for g in calls]==['red_1'] and 'no applicable placement rule' in outcome.message
+        unknown=obj('unknown_4',4,0.4,0.12)
+        calls,outcome=run_case(cell,'unknown_class',[red,unknown],overrides={**partial,'place_positions.4':[0,0,0]},expected=False)
+        assert len(calls)==1 and 'undefined class' in outcome.message
+        calls,outcome=run_case(cell,'unknown_rule_no_fallback',[red],overrides={'place_positions.4':[0.2,0.0,0.005]},expected=False)
+        assert not calls and 'no applicable placement rule' in outcome.message
+        calls,outcome=run_case(cell,'incomplete_perception',[red],overrides=partial,
+            issues=['undefined class 10'],expected=False)
+        assert len(calls)==1 and 'perception:undefined class 10' in outcome.message
+
+        catalog=yaml.safe_load((ROOT/'src/my_robot_perception/config/object_classes.yaml').read_text())
+        fourth=copy.deepcopy(catalog['classes'][0])
+        fourth.update(id=4,name='other_red_box')
+        catalog['classes'].append(fourth)
+        catalog_path=ROOT/'log/adaptive_planner/classes.yaml'
+        catalog_path.write_text(yaml.safe_dump(catalog))
+        alien=obj('other_red',4,0.4,0.12)
+        alien.color=1
+        def wrong_class_at_goal(goal,attempt):
+            placed=copy.deepcopy(alien)
+            placed.pose=copy.deepcopy(goal.place_pose.pose)
+            cell.scene=[placed]
+            return 'empty'
+        calls,outcome=run_case(cell,'same_color_wrong_class',[red],wrong_class_at_goal,
+            overrides={**partial,'class_config_override':str(catalog_path)},expected=False)
+        assert len(calls)==1 and 'verified/completed=0' in outcome.message
+
+        alternate=copy.deepcopy(catalog)
+        alternate['classes']=alternate['classes'][:3]
+        for entry,cid in zip(alternate['classes'],[11,27,42]):
+            entry['id']=cid
+        alternate_path=ROOT/'log/adaptive_planner/alternate_classes.yaml'
+        alternate_path.write_text(yaml.safe_dump(alternate))
+        marked=copy.deepcopy(red)
+        marked.class_id=11
+        custom={'class_config_override':str(alternate_path),'place_positions.11':[-0.05,-0.01,0.0005],
+                'place_position_modes':['relative']*3}
+        calls,_=run_case(cell,'non_contiguous_class',[marked],overrides=custom,expected=True)
+        assert len(calls)==1
+        calls,_=run_case(cell,'legacy_color_mapping',[marked],overrides=custom,legacy_colors=[1],expected=True)
+        assert len(calls)==1
+
+        large=copy.deepcopy(red)
+        large.dimensions.x=0.10
+        small=copy.deepcopy(green)
+        def hide_released(goal,attempt):
+            cell.scene=[o for o in cell.scene if o.object_id!=goal.object_id]
+            return 'success'
+        calls,_=run_case(cell,'reservation_dimensions',[large,small],hide_released,
+            overrides={'place_positions.1':[0.26,0.0,0.005],'place_positions.2':[0.30,0.0,0.005],
+                       'slot_clearance':0.0,'placement_verification':'motion'},
+            cancel_when=lambda _:len(cell.calls)==1 and cell.frame_count>=30)
+        assert len(calls)==1
         print('All adaptive planner logic probes passed (synthetic observations).', flush=True)
     finally:
         executor.shutdown(timeout_sec=3)

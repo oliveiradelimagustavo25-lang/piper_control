@@ -11,8 +11,8 @@ task_planner:
     end_effector_frame: link6
     tool_to_tcp: [0.0, 0.0, 0.132]
 
-    default_strategy: color_order
-    default_color_order: [1, 2, 3]   # 红、绿、蓝；缺色不阻塞
+    default_strategy: class_order
+    default_class_order: []         # 使用类别表顺序；如 [1, 2, 3] 可筛选并指定类别优先级
     finish_mode: batch              # batch: 健康空闲后结束；watch: 持续等待
     idle_timeout: 3.0               # s，0 不自动结束
     max_objects: 0                 # 0 不限；按已核验搬运次数计数
@@ -23,8 +23,8 @@ task_planner:
     on_slots_full: wait            # wait / finish；不强行重叠放置
     placement_verification: visual # visual / motion（motion 仅确认运动流程）
     verification_timeout: 3.0      # s，回观察位后等待抓后核验
-    slot_tolerance: 0.012          # m，物体中心相对本颜色槽位的容差
-    slot_clearance: 0.025          # m，放置候选与已观测物体之间的额外净空
+    slot_tolerance: 0.012          # m，物体中心相对本类别槽位的容差
+    slot_clearance: 0.010          # m，方块之外的额外净空；运动路径仍由 MoveIt 检查
     max_observation_age: 2.0
     observation_timeout: 5.0       # s，等待异常的告警间隔，默认保留任务等待恢复
     action_timeout: 180.0          # s，超时请求取消，等待执行器返回状态
@@ -34,16 +34,19 @@ task_planner:
     workspace_min: []
     workspace_max: []
 
-    # 以原点为中心、按间距在各颜色区域内自动生成放置候选，不配置每色物体数量。
+    # 以原点为中心、按间距在各类别区域内自动生成放置候选，不配置每类物体数量。
     # region: [xmin, ymin, xmax, ymax, 物体中心z]，m；可移动/扩大区域以适配工作台。
-    # 规则入口位于总配置。独立启动时可在此配置 place_positions.red/green/blue。
-    # 未提供三色 place_positions 时使用下面区域；相对模式不能套用旧区域原点。
+    # 规则入口位于总配置。独立启动时可在此配置 place_positions.<class_id>。
+    # 未显式提供 place_positions 时使用下面区域；相对模式不能套用旧区域原点。
     place_position_modes: [absolute, absolute, absolute]
     placement_step: [0.04, 0.06]
-    red.place_position: [0.26, -0.12, 0.005]
-    red.place_region: [0.25, -0.14, 0.39, -0.10, 0.005]
-    green.place_position: [0.26, 0.0, 0.005]
-    green.place_region: [0.25, -0.06, 0.39, 0.06, 0.005]
-    blue.place_position: [0.26, 0.12, 0.005]
-    blue.place_region: [0.25, 0.10, 0.39, 0.14, 0.005]
-    # 如需手动指定个别位置，<color>.place_slots 的扁平 xyz 列表优先于 region。
+    # 默认地面 Z=0，3 cm 方块放置中心为 Z=0.015 m。
+    classes.1.place_position: [0.26, -0.12, 0.015]
+    classes.1.place_region: [0.25, -0.14, 0.39, -0.10, 0.015]
+    classes.2.place_position: [0.26, 0.0, 0.015]
+    classes.2.place_region: [0.25, -0.06, 0.39, 0.06, 0.015]
+    classes.3.place_position: [0.26, 0.12, 0.015]
+    classes.3.place_region: [0.25, 0.10, 0.39, 0.14, 0.015]
+    classes.4.place_position: [0.34, 0.12, 0.015]
+    classes.4.place_region: [0.33, 0.10, 0.39, 0.14, 0.015]
+    # 如需手动指定个别位置，classes.<class_id>.place_slots 的扁平 xyz 列表优先于 region。

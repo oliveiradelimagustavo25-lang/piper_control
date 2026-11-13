@@ -1,7 +1,8 @@
-# strategy 为空时使用配置默认值；支持 color_order / nearest。
+# strategy 为空时使用配置默认值；支持 class_order / nearest；color_order 为旧接口。
 string strategy
-# 1=红、2=绿、3=蓝；为空时使用默认列表。
-# color_order 按此顺序分拣；nearest 使用这些颜色筛选候选物体。
+# 按类别选择和排序；空列表使用配置/类别表顺序。与 color_order 不可同时填写。
+uint16[] class_order
+# 旧颜色接口：1=红、2=绿、3=蓝；转换为这些颜色对应的类别，不把颜色值当类别。
 uint8[] color_order
 ---
 # 表示本批 PickPlace 运动流程完成，实际放置仍需视觉复核。

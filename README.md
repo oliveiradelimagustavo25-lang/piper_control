@@ -144,7 +144,7 @@ python3 test/probes/check_planning_scene.py --recovery # 取消后保留并显�
 
 ## 一键生成场景并分拣
 
-只需修改 `config/mujoco_launch.yaml` 的 `scenes`，按颜色填写多个 `[x,y,z]`；不填使用原有默认三色，显式 `[]` 不生成对应颜色。运行 `./script/pick_three_colors.sh` 自动完成 XML 生成和完整启动，无需另建场景文件。辅助 Python 位于 `script/build/`，规则见 [脚本说明](script/README.md#场景与一键启动)。
+只需修改 `config/mujoco_launch.yaml` 的 `scenes`，按共同类别表的 ID 填写多个 `[x,y,z]`；不填/null 使用表中默认位置，显式映射只生成列出的类别，`[]` 不生成对应类别。运行 `./script/pick_three_colors.sh` 自动完成 XML 生成和完整启动，无需另建场景文件。辅助 Python 位于 `script/build/`，规则见 [脚本说明](script/README.md#场景与一键启动)。
 
 总配置还支持 `place_position_modes` 与 `place_positions`，按 X/Y/Z 混合相对偏移和绝对物体中心；显式规则覆盖 planner 的区域策略。可先运行 `./script/pick_three_colors.sh --dry-run` 查看有效规则及优先级，详见 [放置规则说明](script/README.md#放置坐标规则与优先级)。
 

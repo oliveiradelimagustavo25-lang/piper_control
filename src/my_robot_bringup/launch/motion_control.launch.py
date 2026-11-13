@@ -66,7 +66,9 @@ def launch_setup(context):
         raise ValueError('pick_place_action and legacy action_name disagree')
     named = argument('move_to_named_action') or execution.get('move_to_named_action', '/manipulation/move_to_named')
     execution.update(action_name=pick, move_to_named_action=named)
-    planner.update(pick_place_action=pick, move_to_named_action=named, use_sim_time=True)
+    planner.update(pick_place_action=pick, move_to_named_action=named, use_sim_time=True,
+                   perception_config=argument('perception_config'),
+                   class_config_override=argument('class_config'))
     if argument('objects_topic'):
         # Both the planner and the planning-scene snapshot use the same detections.
         execution['objects_topic'] = argument('objects_topic')
@@ -90,6 +92,7 @@ def generate_launch_description():
     moveit = Path(get_package_share_directory('my_robot_moveit_pkg'))
     commander = Path(get_package_share_directory('my_robot_commander'))
     planner = Path(get_package_share_directory('my_robot_planner'))
+    perception = Path(get_package_share_directory('my_robot_perception'))
     arguments = [
         DeclareLaunchArgument('robot_description', default_value='', description='Expanded robot description'),
         DeclareLaunchArgument('planning_pipeline', default_value='ompl', description='MoveIt planning pipeline'),
@@ -99,6 +102,8 @@ def generate_launch_description():
                               description='Pick/place executor configuration'),
         DeclareLaunchArgument('planner_config', default_value=str(planner / 'config/task_planner.yaml'),
                               description='Sorting task planner configuration'),
+        DeclareLaunchArgument('perception_config', default_value=str(perception / 'config/perception.yaml')),
+        DeclareLaunchArgument('class_config', default_value=''),
     ]
     for name, description in {
         'pick_place_action': 'Pick/place action name',
@@ -108,7 +113,7 @@ def generate_launch_description():
         'objects_topic': 'Detected objects input topic',
         'observation_target': 'Observation named pose',
         'place_position_modes': 'X/Y/Z relative or absolute modes',
-        'place_positions': 'Color center coordinates or offsets',
+        'place_positions': 'Class center coordinates or offsets',
     }.items():
         arguments.append(DeclareLaunchArgument(name, default_value='', description=description + '; empty uses YAML'))
     arguments.extend(DeclareLaunchArgument(name, default_value='', description=description + '; empty uses YAML')

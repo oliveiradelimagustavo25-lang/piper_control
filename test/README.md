@@ -87,10 +87,14 @@ python3 test/probes/check_planning_scene.py --recovery
 
 ## 自适应分拣
 
+`python3 test/probes/check_class_catalog.py` 运行真实 CV 和 depth，验证默认三色四实例，以及显式覆盖为非连续类别编号后的颜色映射、各类标称尺寸、中心高度和原图时间戳；同时检查类别表文件相对路径及总入口优先级。这是正常数据流验证，不包含新的故障注入。
+
 `probes/check_multi_object_perception.py` 使用合成标签/深度检查多实例、移动、重现、歧义和 TF 异常；`probes/check_adaptive_planner.py` 用模拟执行器检查缺色、重试、抓空核验、ROI、重现优先级及取消，不证明物理抓取。
 
-`check_scene_config.py` 离线检查总配置场景生成与默认/优先级语义。`xvfb-run -a python3 test/probes/check_multi_object_sorting.py` 直接运行唯一 `.sh` 入口；可用 `--red 0 --green 4 --blue 0`、`--red 3 --green 1 --blue 1` 生成临时测试输入，也可直接测试 `--config` 指定的总配置。测试不传 XML，验收数量和放置位置从输入及运行中参数推导。每次使用空闲独立 ROS 域，可用 `--ros-domain-id` 覆盖。详细配置与局限见 [planner 说明](../src/my_robot_planner/README.md)。
+`check_scene_config.py` 离线检查总配置场景生成与默认/优先级语义。`xvfb-run -a python3 test/probes/check_multi_object_sorting.py` 直接运行唯一 `.sh` 入口；可用 `--count 2=4`、`--count 1=3 --count 2=1 --count 3=1` 生成临时测试输入，也可直接测试 `--config` 指定的总配置。测试不传 XML，验收数量直接从请求输入推导，并按 class_id 核验，不从生成 XML 或颜色前缀反推。每次使用空闲独立 ROS 域，可用 `--ros-domain-id` 覆盖。详细配置与局限见 [planner 说明](../src/my_robot_planner/README.md)。
 
 `python3 test/probes/check_clear_processes.py` 离线检查清理选择边界，不创建或终止任何节点；覆盖孤立 launch 连带节点、正常 launch 保留、跨域/跨目录排除与 RViz 范围。
 
 `check_placement_config.py` 验证放置规则校验、实际 launch 参数优先级和脚本 dry-run。调度探针增加逐轴混合、负绝对 Z、冻结目标重试、抓空、目标 ID 改变、零偏移和占用等待等用例；完整入口探针同时支持区域和相对/绝对规则，从运行参数推导目标。
+
+类别升级回归增加未定义 ID、缺失放置规则、同色不同类核验、不同尺寸预留及不完整感知汇总；场景生成检查请求/生成/跳过报告，并检查 CLI 类别表覆盖和圆柱几何尺寸（只验证生成，不证明圆柱识别抓取）。

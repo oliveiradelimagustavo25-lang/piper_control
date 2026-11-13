@@ -10,6 +10,7 @@
   <depend>std_srvs</depend>
   <depend>rclcpp_action</depend>
   <depend>my_robot_interface</depend>
+  <depend>my_robot_perception</depend>
   <depend>geometry_msgs</depend>
   <depend>tf2</depend>
   <depend>tf2_ros</depend>

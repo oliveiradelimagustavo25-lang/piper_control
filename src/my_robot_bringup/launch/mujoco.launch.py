@@ -34,11 +34,12 @@ EXECUTION_ARGUMENTS = {
 }
 
 
-# The detailed color thresholds and localization settings remain in perception_config.
+# Class properties live in class_config; image/depth processing stays in perception_config.
 PERCEPTION_ARGUMENTS = {
     'perception_config': 'Color and depth node parameters',
+    'class_config': 'Shared class catalog for color detection and depth localization',
     'image_topic': 'RGB image input',
-    'labels_topic': 'Color label image',
+    'labels_topic': 'Class label image',
     'debug_topic': 'Color debug image',
     'depth_topic': 'Aligned depth image input',
     'camera_info_topic': 'Camera calibration input',
@@ -52,7 +53,7 @@ PERCEPTION_ARGUMENTS = {
 # File paths in the external configuration are relative to that YAML file.
 CONFIG_PATHS = {
     'scene_file', 'robot_model', 'camera_config', 'controllers_file',
-    'moveit_controllers_file', 'manipulation_config', 'planner_config', 'perception_config',
+    'moveit_controllers_file', 'manipulation_config', 'planner_config', 'perception_config', 'class_config',
 }
 CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATHS | {
     'headless', 'with_moveit', 'with_rviz', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
@@ -64,6 +65,15 @@ CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATH
 def placement_config():
     path = Path(get_package_share_directory('my_robot_bringup')) / 'build/placement_config.py'
     spec = importlib.util.spec_from_file_location('piper_placement_config', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
+def scene_config():
+    path = Path(get_package_share_directory('my_robot_bringup')) / 'build/scene_config.py'
+    spec = importlib.util.spec_from_file_location('piper_scene_config', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -82,13 +92,13 @@ def load_launch_config(path):
     unknown = set(data) - CONFIG_KEYS
     if unknown:
         raise ValueError(f'Unknown launch_config arguments: {sorted(unknown)}')
-    placement_config().parameters(data)
+    # Placement values are validated after CLI/YAML precedence is resolved.
     for name, value in data.items():
         if name in ('place_position_modes', 'place_positions'):
             continue
         if name == 'scenes':
             if value is not None and not isinstance(value, dict):
-                raise ValueError('scenes must map colors to lists of [x, y, z]')
+                raise ValueError('scenes must map class IDs to lists of [x, y, z]')
             continue
         if value is not None and not isinstance(value, (str, int, float, bool)):
             raise ValueError(f'launch_config value for {name} must be a scalar')
@@ -122,23 +132,10 @@ class ConfigDefault(Substitution):
                 if self.name in CONFIG_PATHS and value:
                     return str((path.parent / value).resolve())
                 return value
-            if self.name == 'scene_file' and config.get('scenes'):
-                # Explicit scene_file (CLI or YAML) has priority. Otherwise the
-                # one-click entry and direct launch share the same generator.
-                key = '_piper_scene_runtime'
-                if key not in context.launch_configurations:
-                    directory = tempfile.mkdtemp(prefix='piper_scene_')
-                    helper = Path(get_package_share_directory('my_robot_bringup')) / 'build/scene_config.py'
-                    spec = importlib.util.spec_from_file_location('piper_scene_config', helper)
-                    module = importlib.util.module_from_spec(spec)
-                    try:
-                        spec.loader.exec_module(module)
-                        module.generate(config['scenes'], directory, get_package_share_directory('my_robot_world'))
-                    except Exception:
-                        shutil.rmtree(directory, ignore_errors=True)
-                        raise
-                    context.launch_configurations[key] = directory
-                return str(Path(context.launch_configurations[key]) / 'scene.xml')
+        if self.name == 'scene_file':
+            # Only a defaulted scene may be generated. Resolve the catalog after
+            # all arguments exist, so an explicit CLI class_config wins as well.
+            context.launch_configurations['_piper_generate_scene'] = 'true'
         return perform_substitutions(context, self.fallback)
 
 
@@ -164,7 +161,7 @@ def control_layer(bringup, argument):
 
 def motion_layer(bringup, argument, objects_topic):
     names = ('planning_pipeline', 'moveit_controllers_file', 'manipulation_config',
-             'planner_config', 'pick_place_action', 'sort_action', 'observation_target',
+             'planner_config', 'perception_config', 'class_config', 'pick_place_action', 'sort_action', 'observation_target',
              'place_position_modes', 'place_positions',
              *EXECUTION_ARGUMENTS)
     arguments = {name: argument(name) for name in names}
@@ -208,6 +205,20 @@ def launch_setup(context):
         raise ValueError('with_perception:=true requires with_motion:=true')
     bringup = Path(get_package_share_directory('my_robot_bringup'))
 
+    catalog_path = scene_config().catalog_file(argument('perception_config'), argument('class_config'))
+    context.launch_configurations['class_config'] = str(catalog_path)
+    if context.launch_configurations.get('_piper_generate_scene') == 'true':
+        directory = tempfile.mkdtemp(prefix='piper_scene_')
+        try:
+            config = load_launch_config(str(Path(config_file).expanduser().resolve())) if config_file else {}
+            generated = scene_config().generate(config.get('scenes'), directory,
+                                                get_package_share_directory('my_robot_world'), catalog_path)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        context.launch_configurations['_piper_scene_runtime'] = directory
+        context.launch_configurations['scene_file'] = str(generated)
+
     # Share the perception output when both layers run; otherwise let the
     # standalone planner use its own configured object source.
     objects_topic = argument('objects_topic')
@@ -224,7 +235,8 @@ def launch_setup(context):
         planner = placement_config().resolve(planner, argument('place_position_modes'), argument('place_positions'))
         execution = yaml.safe_load(Path(argument('manipulation_config')).read_text())['pick_place_executor']['ros__parameters']
         frame = argument('reference_frame') or execution.get('reference_frame', 'base_link')
-        return layers + [LogInfo(msg=line) for line in placement_config().describe(planner, frame)]
+        return layers + [LogInfo(msg=line) for line in placement_config().describe(
+            planner, frame, scene_config().load_catalog(catalog_path))]
     layers.append(control_layer(bringup, argument))
     if with_motion:
         layers.append(motion_layer(bringup, argument, objects_topic))
@@ -247,7 +259,7 @@ def generate_launch_description():
                               description='Optional external YAML with launch argument defaults'),
         config_argument('dry_run', default_value='false', choices=['true', 'false'], description='Validate and describe placement without starting nodes'),
         config_argument('place_position_modes', default_value='', description='X/Y/Z relative or absolute modes; empty uses planner YAML'),
-        config_argument('place_positions', default_value='', description='Mapping of red/green/blue center coordinates or offsets'),
+        config_argument('place_positions', default_value='', description='Mapping of class IDs to center coordinates or offsets'),
         config_argument('headless', default_value='false', choices=['true', 'false'],
                               description='Run without the MuJoCo window'),
         config_argument('with_moveit', default_value='true', choices=['true', 'false'],

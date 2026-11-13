@@ -19,31 +19,42 @@ def load(name, path):
 
 
 rules = load('placement_config', ROOT/'script/build/placement_config.py')
-POSITIONS = {c:[-0.05,-0.01,0.0005] for c in rules.COLORS}
+POSITIONS = {c:[-0.05,-0.01,0.0005] for c in (1,2,3)}
 
 
 class PlacementConfigCheck(unittest.TestCase):
     def test_validation(self):
-        for value in [None, {}, {'red':None,'green':[0,0,0],'blue':[0,0,0]},
-                      {**POSITIONS,'blue':[0,float('nan'),0]}, {**POSITIONS,'red':[False,0,0]}]:
-            with self.assertRaises(ValueError):
-                rules.parameters({'place_positions':value})
+        import warnings
+        for value in [None, {1:None}, {1:[0,float('nan'),0]}, {1:[False,0,0]}]:
+            with warnings.catch_warnings(record=True) as notes:
+                result=rules.parameters({'place_positions':value})
+            self.assertTrue(result['use_position_rules'])
+            self.assertNotIn('place_positions.1',result)
+            self.assertTrue(notes)
+        result=rules.parameters({'place_positions':{1:[1,2,3]}})
+        self.assertEqual(result['place_positions.1'],[1,2,3])
+        self.assertNotIn('place_positions.2',result)
         for value in [None,[],['relative']*2,['relative','absolute','invalid']]:
             with self.assertRaises(ValueError):
                 rules.parameters({'place_position_modes':value})
 
     def test_no_implicit_legacy_offsets(self):
-        old={'red.place_position':[0.26,-0.06,0.005]}
+        old={'classes.1.place_position':[0.26,-0.06,0.005]}
         self.assertEqual(rules.resolve(old),old)
         with self.assertRaises(ValueError):
             rules.resolve(old,'[relative, relative, relative]')
-        with self.assertRaises(ValueError):
-            rules.resolve({'place_positions':None})
+        self.assertTrue(rules.resolve({'place_positions':{}})['use_position_rules'])
+        empty=rules.resolve({},'[relative, relative, relative]','{}')
+        self.assertTrue(rules.resolve(empty)['use_position_rules'])
+        import warnings
+        with warnings.catch_warnings(record=True):
+            result=rules.resolve({'place_positions':None,'place_positions.1':[1.,2.,3.]})
+        self.assertNotIn('place_positions.1',result)
 
     def test_effective_override_can_replace_lower_null(self):
-        result=rules.resolve({'place_positions.red':None, 'place_position_modes':None},
+        result=rules.resolve({'place_positions.1':None, 'place_position_modes':None},
                              '[relative, absolute, absolute]',yaml.safe_dump(POSITIONS))
-        self.assertEqual(result['place_positions.red'],POSITIONS['red'])
+        self.assertEqual(result['place_positions.1'],POSITIONS[1])
         self.assertEqual(result['place_position_modes'],['relative','absolute','absolute'])
 
     def test_actual_launch_priority(self):
@@ -60,14 +71,14 @@ class PlacementConfigCheck(unittest.TestCase):
                 if isinstance(action,DeclareLaunchArgument):
                     action.execute(context)
             base={'place_position_modes':['absolute']*3,
-                  **{'place_positions.'+c:[10.,20.,30.] for c in rules.COLORS}}
+                  **{'place_positions.'+str(c):[10.,20.,30.] for c in (1,2,3)}}
             result=motion.resolve_placement(base,context.launch_configurations['place_position_modes'],
                                            context.launch_configurations['place_positions'])
             self.assertEqual(result['place_position_modes'],['relative','absolute','absolute'])
-            self.assertEqual(result['place_positions.red'],POSITIONS['red'])
-            explicit={c:[0.1,0.2,0.3] for c in rules.COLORS}
+            self.assertEqual(result['place_positions.1'],POSITIONS[1])
+            explicit={c:[0.1,0.2,0.3] for c in (1,2,3)}
             result=motion.resolve_placement(result,'',yaml.safe_dump(explicit))
-            self.assertEqual(result['place_positions.red'],explicit['red'])
+            self.assertEqual(result['place_positions.1'],explicit[1])
 
     def test_dry_run_through_script(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -75,28 +86,28 @@ class PlacementConfigCheck(unittest.TestCase):
             path.write_text(yaml.safe_dump({'place_position_modes':['relative']*3,'place_positions':POSITIONS,
                 'planner_config':str(ROOT/'src/my_robot_planner/config/task_planner.yaml'),
                 'manipulation_config':str(ROOT/'src/my_robot_commander/config/manipulation.yaml')}))
-            positions={c:[-0.24,-0.06,-0.12] for c in rules.COLORS}
+            positions={c:[-0.24,-0.06,-0.12] for c in (1,2,3)}
             result=subprocess.run([str(ROOT/'script/pick_three_colors.sh'),'--dry-run','--config',str(path),'--',
                 'place_position_modes:=[relative, absolute, absolute]',
                 'place_positions:='+yaml.safe_dump(positions,default_flow_style=True)],
                 capture_output=True,text=True,timeout=20)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertIn('red object center = [initial_x -0.24, -0.06, -0.12]',result.stdout)
+            self.assertIn('class 1 object center = [initial_x -0.24, -0.06, -0.12]',result.stdout)
             self.assertNotIn('process started',result.stdout)
             alternate=Path(directory)/'planner.yaml'
             alternate.write_text(yaml.safe_dump({'task_planner':{'ros__parameters':{
                 'place_position_modes':['absolute']*3,
-                **{'place_positions.'+c:[999.,999.,999.] for c in rules.COLORS}}}}))
+                **{'place_positions.'+str(c):[999.,999.,999.] for c in (1,2,3)}}}}))
             result=subprocess.run([str(ROOT/'script/pick_three_colors.sh'),'--dry-run','--config',str(path),
                                    '--planner-config',str(alternate)],capture_output=True,text=True,timeout=20)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertIn('red object center = [initial_x -0.05, initial_y -0.01, initial_z +0.0005]',result.stdout)
+            self.assertIn('class 1 object center = [initial_x -0.05, initial_y -0.01, initial_z +0.0005]',result.stdout)
             self.assertNotIn('999',result.stdout)
-            path.write_text('place_positions: null\n')
+            path.write_text('place_positions: {1: [0,0,0], 4: [0,0,0]}\n')
             result=subprocess.run([str(ROOT/'script/pick_three_colors.sh'),'--dry-run','--config',str(path)],
                                   capture_output=True,text=True,timeout=20)
-            self.assertNotEqual(result.returncode,0)
-            self.assertIn('null',result.stdout+result.stderr)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertIn('Ignored placement class 4',result.stdout)
 
 
 if __name__=='__main__':

@@ -2,6 +2,8 @@
 
 MuJoCo 世界资源与传感器代码：
 
+原生 `objects/cubes.xml` 的三个方块均为 3×3×3 cm；MuJoCo `size` 使用半边长 `[0.015, 0.015, 0.015]` m，与共同类别表中的完整边长一致。完整入口中的黄色方块由类别表及总配置自动生成。
+
 ```text
 basic/preview.xml        # 基础世界组合
 scenes/scene.py          # 世界加载与机器人资源解析
