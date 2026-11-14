@@ -60,6 +60,7 @@ PickPlaceScene::PickPlaceScene(
   const std::string & frame, const std::string & tool_link)
 : node_(node), tf_(tf), frame_(frame), tool_link_(tool_link)
 {
+  classes_ = my_robot_perception::loadCatalog(*node_);
   alias_distance_ = parameter(node_, "visual_alias_distance", 0.004);
   touch_links_ = parameter<std::vector<std::string>>(node_, "touch_links", {"link7", "link8"});
   get_scene_ = node_->create_client<moveit_msgs::srv::GetPlanningScene>("get_planning_scene");
@@ -88,21 +89,44 @@ PickPlaceScene::PickPlaceScene(
   apply(update);
 }
 
-moveit_msgs::msg::AllowedCollisionMatrix PickPlaceScene::collisionMatrix()
+moveit_msgs::msg::PlanningScene PickPlaceScene::snapshot(uint32_t components)
 {
   using namespace std::chrono_literals;
   if (!get_scene_->wait_for_service(5s)) {
     throw std::runtime_error("MoveIt planning scene service unavailable");
   }
   auto request = std::make_shared<moveit_msgs::srv::GetPlanningScene::Request>();
-  request->components.components =
-    moveit_msgs::msg::PlanningSceneComponents::ALLOWED_COLLISION_MATRIX;
+  request->components.components = components;
   auto result = get_scene_->async_send_request(request);
   if (result.wait_for(5s) != std::future_status::ready) {
     get_scene_->remove_pending_request(result);
     throw std::runtime_error("Planning scene query timed out");
   }
-  return result.get()->scene.allowed_collision_matrix;
+  return result.get()->scene;
+}
+
+moveit_msgs::msg::AllowedCollisionMatrix PickPlaceScene::collisionMatrix()
+{
+  return snapshot(moveit_msgs::msg::PlanningSceneComponents::ALLOWED_COLLISION_MATRIX)
+         .allowed_collision_matrix;
+}
+
+moveit_msgs::msg::PlanningScene PickPlaceScene::placementScene(
+  const geometry_msgs::msg::PoseStamped & object_pose)
+{
+  using Components = moveit_msgs::msg::PlanningSceneComponents;
+  auto scene = snapshot(Components::ROBOT_STATE | Components::ROBOT_STATE_ATTACHED_OBJECTS |
+    Components::WORLD_OBJECT_GEOMETRY | Components::OCTOMAP | Components::TRANSFORMS |
+    Components::ALLOWED_COLLISION_MATRIX | Components::LINK_PADDING_AND_SCALING);
+  // 仅修改本地快照，将目标从抓取点移到预计放置中心；保持真实场景不变。
+  auto & objects = scene.world.collision_objects;
+  objects.erase(std::remove_if(objects.begin(), objects.end(),
+    [&](const auto & object) {return object.id == target_id_;}), objects.end());
+  auto target = target_;
+  target.header = object_pose.header;
+  target.pose = object_pose.pose;
+  objects.push_back(target);
+  return scene;
 }
 
 void PickPlaceScene::apply(const moveit_msgs::msg::PlanningScene & update)
@@ -136,8 +160,7 @@ void PickPlaceScene::sync(
       if (pose.header.frame_id != frame_) {
         pose = tf_.transform(pose, frame_, tf2::durationFromSec(0.1));
       }
-      auto shape = box(object.object_id, pose,
-        {object.dimensions.x, object.dimensions.y, object.dimensions.z});
+      auto shape = objectShape(object.object_id, pose, object.dimensions, object.class_id);
       // 完成校验后才处理别名，坏尺寸不能误删已有碰撞物体。
       // 仅合并同一位置的视觉别名，不把离开视野的障碍当作已消失。
       for (auto it = visual_objects_.begin(); it != visual_objects_.end();) {
@@ -162,12 +185,35 @@ void PickPlaceScene::sync(
   if (!update.world.collision_objects.empty()) {apply(update);}
 }
 
+moveit_msgs::msg::CollisionObject PickPlaceScene::objectShape(
+  const std::string & id, const geometry_msgs::msg::PoseStamped & pose,
+  const geometry_msgs::msg::Vector3 & dimensions, uint16_t class_id) const
+{
+  const auto found = std::find_if(classes_.begin(), classes_.end(),
+    [class_id](const auto & entry) {return entry.id == class_id;});
+  auto object = box(id, pose, {dimensions.x, dimensions.y, dimensions.z});
+  if (found == classes_.end()) {return object;}
+  const auto & d = found->dimensions;
+  auto & primitive = object.primitives.front();
+  primitive.dimensions.assign(d.begin(), d.end());
+  if (found->geometry == "cylinder") {
+    primitive.type = primitive.CYLINDER;
+    primitive.dimensions = {d[2], std::max(d[0], d[1]) / 2};  // height, radius
+  } else if (found->geometry == "sphere") {
+    primitive.type = primitive.SPHERE;
+    primitive.dimensions = {*std::max_element(d.begin(), d.end()) / 2};
+  }
+  // 其他几何继续使用标称包围盒，不因缺少专用模型而排除目标。
+  return object;
+}
+
 void PickPlaceScene::prepare(
   const std::string & id,
-  const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Vector3 & dimensions)
+  const geometry_msgs::msg::PoseStamped & pose, const geometry_msgs::msg::Vector3 & dimensions,
+  uint16_t class_id)
 {
   target_id_ = id;
-  target_ = box(id, pose, {dimensions.x, dimensions.y, dimensions.z});
+  target_ = objectShape(id, pose, dimensions, class_id);
   auto update = diff();
   update.world.collision_objects.push_back(target_);
   visual_objects_[id] = target_;

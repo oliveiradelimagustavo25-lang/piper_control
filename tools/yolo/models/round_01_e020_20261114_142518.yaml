@@ -1,0 +1,19 @@
+file: models/artifacts/round_01_e020_20261114_142518.onnx
+source_weights: best.pt
+sha256: bbc627aec67fd527c0d7ec9cfe24cb30159d8ba2fc1cec24ed4a8a8379a18557
+ultralytics: 8.4.130
+names:
+  0: red_cube
+  1: green_cube
+  2: blue_cube
+  3: yellow_cube
+  4: red_cylinder
+  5: blue_cylinder
+imgsz: 640
+batch: 1
+precision: FP32
+layout: raw
+opset: 18
+training_round: 1
+epochs: 20
+trained_at: '20261114_142518'

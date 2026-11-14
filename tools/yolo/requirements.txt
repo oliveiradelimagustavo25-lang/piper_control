@@ -1,0 +1,8 @@
+# Offline training/export environment only; ROS/C++ inference does not import these.
+mujoco>=3.2
+numpy>=1.26
+opencv-python>=4.8
+pyyaml>=6.0
+ultralytics>=8.4,<9
+onnx>=1.18,<2
+onnxruntime>=1.23,<2

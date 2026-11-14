@@ -591,6 +591,7 @@ private:
     active_slot_ = {object.class_id, slot};
     Pick::Goal goal;
     goal.object_id = object.object_id;
+    goal.class_id = object.class_id;
     goal.object_pose.header = observations_->header;
     goal.object_pose.header.frame_id = frame_;
     goal.object_pose.pose = object.pose;

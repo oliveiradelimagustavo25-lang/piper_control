@@ -37,10 +37,14 @@ inline std::vector<ObjectClass> loadCatalog(rclcpp::Node & node)
 {
   const auto config_dir = std::filesystem::path(
     ament_index_cpp::get_package_share_directory("my_robot_perception")) / "config";
-  const auto perception_config = node.declare_parameter<std::string>("perception_config", "");
-  auto configured = node.declare_parameter<std::string>("class_config", "");
+  const auto parameter = [&](const std::string & name) {
+    return node.has_parameter(name) ? node.get_parameter(name).as_string() :
+           node.declare_parameter<std::string>(name, "");
+  };
+  const auto perception_config = parameter("perception_config");
+  auto configured = parameter("class_config");
   // 独立参数保留来源：显式 launch 覆盖相对于工作目录，YAML 值相对于 YAML。
-  const auto override = node.declare_parameter<std::string>("class_config_override", "");
+  const auto override = parameter("class_config_override");
   if (override.empty() && configured.empty() && !perception_config.empty()) {
     configured = YAML::LoadFile(perception_config)["/**"]["ros__parameters"]["class_config"].as<std::string>("");
   }

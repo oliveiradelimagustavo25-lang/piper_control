@@ -7,6 +7,7 @@
 
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
+#include <moveit/planning_scene/planning_scene.h>
 #include <tf2/LinearMath/Quaternion.hpp>
 
 namespace my_robot_commander
@@ -59,6 +60,24 @@ struct MotionController::Impl
     }
   }
 
+  bool solvePose(moveit::core::RobotState & state,
+    const geometry_msgs::msg::PoseStamped & target)
+  {
+    const auto & q = target.pose.orientation;
+    const double norm = std::hypot(std::hypot(q.x, q.y), std::hypot(q.z, q.w));
+    if (!finitePose(target.pose) || norm < 1e-9 || target.header.frame_id.empty()) {return false;}
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    pose.linear() = Eigen::Quaterniond(q.w, q.x, q.y, q.z).normalized().toRotationMatrix();
+    const auto & p = target.pose.position;
+    pose.translation() = Eigen::Vector3d(p.x, p.y, p.z);
+    if (target.header.frame_id != state.getRobotModel()->getModelFrame()) {
+      if (!state.getRobotModel()->hasLinkModel(target.header.frame_id)) {return false;}
+      pose = state.getGlobalLinkTransform(target.header.frame_id) * pose;
+    }
+    const auto * group = state.getJointModelGroup(options.arm_group);
+    return group && state.setFromIK(group, pose, arm->getEndEffectorLink(), 0.2);
+  }
+
   bool planAndExecute(Group & group)
   {
     Group::Plan plan;
@@ -99,18 +118,40 @@ bool MotionController::canReachPose(const geometry_msgs::msg::PoseStamped & targ
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   auto state = impl_->arm->getCurrentState();
-  if (!state || !finitePose(target.pose)) {return false;}
-  Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
-  const auto & q = target.pose.orientation;
-  pose.linear() = Eigen::Quaterniond(q.w, q.x, q.y, q.z).normalized().toRotationMatrix();
-  const auto & p = target.pose.position;
-  pose.translation() = Eigen::Vector3d(p.x, p.y, p.z);
-  if (target.header.frame_id != state->getRobotModel()->getModelFrame()) {
-    if (!state->getRobotModel()->hasLinkModel(target.header.frame_id)) {return false;}
-    pose = state->getGlobalLinkTransform(target.header.frame_id) * pose;
+  return state && impl_->solvePose(*state, target);
+}
+
+bool MotionController::canReleaseAt(const geometry_msgs::msg::PoseStamped & target,
+  const std::vector<double> & closed, const std::vector<double> & released,
+  const moveit_msgs::msg::PlanningScene & scene_message)
+{
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  planning_scene::PlanningScene scene(impl_->arm->getRobotModel());
+  scene.setPlanningSceneMsg(scene_message);
+  auto & state = scene.getCurrentStateNonConst();
+  const auto * gripper = state.getJointModelGroup(impl_->options.gripper_group);
+  if (!gripper || closed.size() != gripper->getVariableCount() ||
+    released.size() != closed.size() || !impl_->solvePose(state, target)) {return false;}
+  double distance = 0;
+  for (size_t i = 0; i < closed.size(); ++i) {
+    if (!std::isfinite(closed[i]) || !std::isfinite(released[i])) {return false;}
+    distance = std::max(distance, std::abs(released[i] - closed[i]));
   }
-  const auto * group = state->getJointModelGroup(impl_->options.arm_group);
-  return group && state->setFromIK(group, pose, impl_->arm->getEndEffectorLink(), 0.2);
+  // 每根手指最多移动 1 mm 后检查一次；同时检查手臂、夹爪和周围物体。
+  const int steps = std::max(1, static_cast<int>(std::ceil(distance / 0.001)));
+  for (int step = 0; step <= steps; ++step) {
+    std::vector<double> joints(closed.size());
+    for (size_t i = 0; i < joints.size(); ++i) {
+      joints[i] = closed[i] + (released[i] - closed[i]) * step / steps;
+    }
+    state.setJointGroupPositions(gripper, joints);
+    state.update();
+    if (!state.satisfiesBounds(gripper) || scene.isStateColliding(state)) {
+      RCLCPP_WARN(impl_->node->get_logger(), "Placement gripper release is blocked");
+      return false;
+    }
+  }
+  return true;
 }
 
 bool MotionController::moveToNamedTarget(const std::string & name)

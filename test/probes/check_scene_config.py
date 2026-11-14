@@ -27,6 +27,17 @@ scene = load('scene_config', ROOT/'script/build/scene_config.py')
 
 
 class SceneConfigCheck(unittest.TestCase):
+    def test_configured_cylinders(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scene.generate({5:[[0.32,-0.1,0.03]],6:[[0.32,0.1,0.03]]},
+                           directory,ROOT/'src/my_robot_world',CATALOG)
+            bodies=ET.parse(Path(directory)/'objects.xml').getroot().findall('body')
+            self.assertEqual(len(bodies),2)
+            for body in bodies:
+                geom=body.find('geom')
+                self.assertEqual(geom.get('type'),'cylinder')
+                self.assertEqual(list(map(float,geom.get('size').split())),[0.025,0.025])
+
     def test_counts_and_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             for counts in [(1,1,1),(0,4,0),(3,1,1),(7,2,5),(0,0,0)]:
@@ -35,7 +46,9 @@ class SceneConfigCheck(unittest.TestCase):
                 bodies=ET.parse(Path(directory)/'objects.xml').getroot().findall('body')
                 self.assertEqual(len(bodies),sum(counts))
                 self.assertEqual(len({b.get('name') for b in bodies}),len(bodies))
-            for config,expected in [(None,3),({},0),({1:[[0.32,0,0.03]]},1)]:
+            defaults = sum('default_position' in entry.get('simulation', {})
+                           for entry in yaml.safe_load(CATALOG.read_text())['classes'])
+            for config,expected in [(None,defaults),({},0),({1:[[0.32,0,0.03]]},1)]:
                 scene.generate(config,directory,ROOT/'src/my_robot_world',CATALOG)
                 self.assertEqual(len(ET.parse(Path(directory)/'objects.xml').getroot()),expected)
 
@@ -44,17 +57,17 @@ class SceneConfigCheck(unittest.TestCase):
             root=Path(directory)
             catalog=yaml.safe_load(CATALOG.read_text())
             cylinder=copy.deepcopy(catalog['classes'][0])
-            cylinder.update(id=4,name='red_cylinder',geometry={'type':'cylinder','dimensions':[0.02,0.02,0.04]})
+            cylinder.update(id=14,name='fixture_cylinder',geometry={'type':'cylinder','dimensions':[0.02,0.02,0.04]})
             cylinder.pop('simulation',None)
             cylinder.pop('cv',None)
             catalog['classes'].append(cylinder)
             path=root/'classes.yaml'
             path.write_text(yaml.safe_dump(catalog))
             with warnings.catch_warnings(record=True) as notes:
-                scene.generate({1:[[0.32,0,0.03]],4:[[0.32,0.1,0.03]],10:[[0.3,-0.1,0.03]]},root,ROOT/'src/my_robot_world',path)
+                scene.generate({1:[[0.32,0,0.03]],14:[[0.32,0.1,0.03]],10:[[0.3,-0.1,0.03]]},root,ROOT/'src/my_robot_world',path)
             report=json.loads((root/'scene_report.json').read_text())
-            self.assertEqual(report['requested'],{'1':1,'4':1,'10':1})
-            self.assertEqual(report['generated'],{'1':1,'4':1})
+            self.assertEqual(report['requested'],{'1':1,'14':1,'10':1})
+            self.assertEqual(report['generated'],{'1':1,'14':1})
             self.assertTrue(notes)
             cylinder=ET.parse(root/'objects.xml').getroot().findall('body')[1].find('geom')
             self.assertEqual(cylinder.get('type'),'cylinder')

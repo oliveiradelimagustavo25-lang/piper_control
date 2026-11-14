@@ -20,19 +20,16 @@ from my_robot_world.scenes.scene import export_scene
 
 
 def camera_plugin_file(runtime, argument):
-    """Match the camera publisher topics to the perception configuration."""
+    """Configure the camera using the supplied topic names."""
     camera = yaml.safe_load(Path(argument('camera_config')).read_text())
-    perception = yaml.safe_load(Path(argument('perception_config')).read_text())
-    color = perception['color_detector']['ros__parameters']
-    depth = perception['depth_localizer']['ros__parameters']
     plugin = {
         'type': 'mujoco_ros2_control_plugins/CameraPlugin',
         'camera_publish_rate': float(camera['update_rate']),
         camera['name']: {
             'policy': 'streaming', 'frame_name': camera['frame'],
-            'image_topic': argument('image_topic') or color['image_topic'],
-            'depth_topic': argument('depth_topic') or depth['depth_topic'],
-            'info_topic': argument('camera_info_topic') or depth['camera_info_topic'],
+            'image_topic': argument('image_topic'),
+            'depth_topic': argument('depth_topic'),
+            'info_topic': argument('camera_info_topic'),
         },
     }
     path = Path(runtime.name) / 'camera_plugin.yaml'
@@ -140,7 +137,6 @@ def generate_launch_description():
     robot = Path(get_package_share_directory('my_robot_description'))
     world = Path(get_package_share_directory('my_robot_world'))
     moveit = Path(get_package_share_directory('my_robot_moveit_pkg'))
-    perception = Path(get_package_share_directory('my_robot_perception'))
     return LaunchDescription([
         DeclareLaunchArgument('headless', default_value='false', choices=['true', 'false'],
                               description='Run without the MuJoCo window'),
@@ -156,11 +152,9 @@ def generate_launch_description():
                               description='Complete world scene'),
         DeclareLaunchArgument('camera_config', default_value=str(world / 'config/camera.yaml'),
                               description='MuJoCo wrist camera configuration'),
-        DeclareLaunchArgument('perception_config', default_value=str(perception / 'config/perception.yaml'),
-                              description='Default ROS camera topic names'),
-        DeclareLaunchArgument('image_topic', default_value='', description='RGB topic; empty uses perception_config'),
-        DeclareLaunchArgument('depth_topic', default_value='', description='Depth topic; empty uses perception_config'),
-        DeclareLaunchArgument('camera_info_topic', default_value='', description='CameraInfo topic; empty uses perception_config'),
+        DeclareLaunchArgument('image_topic', default_value='/camera_sensor/image_raw', description='RGB topic'),
+        DeclareLaunchArgument('depth_topic', default_value='/camera_sensor/depth/image_raw', description='Depth topic'),
+        DeclareLaunchArgument('camera_info_topic', default_value='/camera_sensor/camera_info', description='CameraInfo topic'),
         DeclareLaunchArgument('controllers_file', default_value=str(robot / 'config/ros2_controllers.yaml'),
                               description='ros2_control controller configuration'),
         DeclareLaunchArgument('with_moveit', default_value='true', choices=['true', 'false'],

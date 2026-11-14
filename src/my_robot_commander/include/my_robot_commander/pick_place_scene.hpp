@@ -15,6 +15,7 @@
 #include <moveit_msgs/srv/get_planning_scene.hpp>
 #include <my_robot_interface/msg/detected_object_array.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <my_robot_perception/object_catalog.hpp>
 #include <tf2_ros/buffer.h>
 
 namespace my_robot_commander
@@ -36,13 +37,20 @@ public:
   void sync(const my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr & observations);
   void prepare(
     const std::string & id, const geometry_msgs::msg::PoseStamped & pose,
-    const geometry_msgs::msg::Vector3 & dimensions);
+    const geometry_msgs::msg::Vector3 & dimensions, uint16_t class_id = 0);
+  moveit_msgs::msg::PlanningScene placementScene(
+    const geometry_msgs::msg::PoseStamped & object_pose);
   void attach();
   void release();
   void restoreTouch();
   bool holding() const {return !held_id_.empty();}
 
 private:
+  moveit_msgs::msg::CollisionObject objectShape(
+    const std::string & id, const geometry_msgs::msg::PoseStamped & pose,
+    const geometry_msgs::msg::Vector3 & dimensions, uint16_t class_id) const;
+  std::vector<my_robot_perception::ObjectClass> classes_;
+  moveit_msgs::msg::PlanningScene snapshot(uint32_t components);
   moveit_msgs::msg::AllowedCollisionMatrix collisionMatrix();
   void apply(const moveit_msgs::msg::PlanningScene & scene);
   rclcpp::Node::SharedPtr node_;

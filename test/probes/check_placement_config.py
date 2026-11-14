@@ -103,11 +103,11 @@ class PlacementConfigCheck(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertIn('class 1 object center = [initial_x -0.05, initial_y -0.01, initial_z +0.0005]',result.stdout)
             self.assertNotIn('999',result.stdout)
-            path.write_text('place_positions: {1: [0,0,0], 4: [0,0,0]}\n')
+            path.write_text('place_positions: {1: [0,0,0], 241: [0,0,0]}\n')
             result=subprocess.run([str(ROOT/'script/pick_three_colors.sh'),'--dry-run','--config',str(path)],
                                   capture_output=True,text=True,timeout=20)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-            self.assertIn('Ignored placement class 4',result.stdout)
+            self.assertIn('Ignored placement class 241',result.stdout)
 
 
 if __name__=='__main__':

@@ -1,7 +1,8 @@
 /**:
   ros__parameters:
-    # 相对于本文件；两个节点共用这一份表。launch 的 class_config 参数可统一覆盖。
+    # 相对于本文件；检测节点和 depth 共用这一份表。
     class_config: object_classes.yaml
+    detector: cv               # 总入口/独立 bringup 的 detector 参数可覆盖：cv 或 yolo
 
 color_detector:
   ros__parameters:
@@ -17,6 +18,22 @@ color_detector:
     opening_kernel: 3           # 先腐蚀后膨胀，去除小噪点；正奇数，1 表示关闭
     closing_kernel: 5           # 先膨胀后腐蚀，连接小断裂；过大会合并相邻同色物体
 
+yolo_detector:
+  ros__parameters:
+    image_topic: /camera_sensor/image_raw
+    labels_topic: /perception/color_labels
+    debug_topic: /perception/color_debug
+    show_window: false
+    publish_debug: true
+    # 相对于本 YAML；留空不影响 CV。选择 yolo 时必须提供匹配类别表的分割 ONNX。
+    # 可用 yolo_model:=... 覆盖；模型自带的 names 按名称映射到项目 class_id。
+    model_path: ""
+    confidence: 0.25
+    iou_threshold: 0.45          # raw 输出才使用；端到端输出不重复 NMS
+    mask_threshold: 0.5
+    min_area: 12                # 像素；不代表物体实际尺寸
+    threads: 1
+
 depth_localizer:
   ros__parameters:
     labels_topic: /perception/color_labels
@@ -29,9 +46,9 @@ depth_localizer:
     objects_frame: base_link     # Z 轴向上的坐标系，物体中心位姿使用此坐标系
     track_match_distance: 0.025  # m，同类物体跨帧匹配；不是物理身份保证
     track_ambiguity_margin: 0.003 # m，近似等距的对应关系标记为不确定
-    top_surface_tolerance: 0.002 # 上部点的高度容差，m；要求物块平放且顶部可见
     tf_timeout: 0.1              # s，等待采集时刻的 TF 到达，避免图像略早于关节 TF
     sync_slop: 0.03               # RGB 标签与深度时间差上限，单位 s
+    sync_queue_size: 30          # 缓存等待推理结果；不放宽采集时间差
     min_depth: 0.05               # 单位 m
     max_depth: 3.0
     depth_tolerance: 0.02         # 保留距区域深度中值不超过此值的像素

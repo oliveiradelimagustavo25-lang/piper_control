@@ -1,0 +1,4 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(OpenCV COMPONENTS core)
+include("${CMAKE_CURRENT_LIST_DIR}/yolo_toolsTargets.cmake")

@@ -15,6 +15,7 @@
     <light pos="0 0 2" dir="0 0 -1"/>
     <geom name="ground" type="plane" size="2 2 0.1" material="ground_material"/>
     <include file="../objects/cubes.xml"/>
-    <include file="../objects/aruco_board.xml"/>
+    <!-- 暂时屏蔽仿真中的 ArUco 标记；需要恢复时取消此行注释。 -->
+    <!-- <include file="../objects/aruco_board.xml"/> -->
   </worldbody>
 </mujoco>

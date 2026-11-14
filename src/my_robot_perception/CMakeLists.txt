@@ -49,6 +49,18 @@ ament_target_dependencies(depth_localizer
 target_include_directories(depth_localizer PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(depth_localizer ${OpenCV_LIBS} object_catalog)
 
+# The normal CV build has no dependency on the external YOLO SDK.
+option(BUILD_YOLO "Build the ROS adapter for the installed yolo_tools SDK" OFF)
+if(BUILD_YOLO)
+  find_package(yolo_tools REQUIRED CONFIG)
+  add_executable(yolo_detector src/yolo_detector.cpp)
+  target_compile_features(yolo_detector PRIVATE cxx_std_17)
+  ament_target_dependencies(yolo_detector rclcpp sensor_msgs cv_bridge)
+  target_link_libraries(yolo_detector yolo_tools::inference ${OpenCV_LIBS} object_catalog)
+  set_target_properties(yolo_detector PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
+  install(TARGETS yolo_detector DESTINATION lib/${PROJECT_NAME})
+endif()
+
 install(DIRECTORY include/ DESTINATION include)
 install(TARGETS object_catalog EXPORT export_object_catalog)
 ament_export_targets(export_object_catalog)

@@ -38,7 +38,7 @@ ros2 launch my_robot_bringup mujoco.launch.py --show-args
 常规参数的优先级是：**命令行显式参数 > 外部总 YAML 中同名参数 > 对应节点 YAML 的值 > 节点代码默认值**。launch 参数留空表示不覆盖节点 YAML。总入口还会主动同步跨节点接口：
 
 - 相机 RGB、深度及 CameraInfo 的显式 launch 参数会覆盖感知 YAML 中的对应话题，并同时用于相机发布和感知订阅；留空则使用感知 YAML。
-- `class_config` 同时传给 CV 和 depth；留空时读取感知 YAML 中 `/**/ros__parameters/class_config`（相对于感知 YAML），再回退安装包类别表。类别、HSV 和标称尺寸统一定义在 [object_classes.yaml](../my_robot_perception/config/object_classes.yaml)，见 [感知说明](../my_robot_perception/README.md)。
+- `class_config` 同时传给检测器、depth、Planner 和执行器碰撞层；留空时读取感知 YAML 中 `/**/ros__parameters/class_config`（相对于感知 YAML），再回退安装包类别表。类别、HSV 和标称尺寸统一定义在 [object_classes.yaml](../my_robot_perception/config/object_classes.yaml)，见 [感知说明](../my_robot_perception/README.md)。
 - 感知层启用时，规划器的 `objects_topic` 与深度节点输出一致；显式 launch 参数优先，否则使用感知 YAML 的值，会覆盖规划器 YAML 中的同名输入。关闭感知时则使用规划器 YAML，除非显式指定 `objects_topic`。
 - 执行器的抓放和命名动作名称会同步给任务规划器；规划器 YAML 中相应名称因此会被执行器配置或 launch 参数覆盖。`pick_place_action` 和旧别名 `action_name` 同时指定且不一致时会报错。
 - 为保持几何一致，规划器的 `reference_frame`、`end_effector_frame`、`tool_to_tcp` 由执行器配置（或相应 launch 参数）统一提供，可能覆盖规划器 YAML。三个分层由总入口启动时统一使用仿真时钟。
@@ -53,7 +53,7 @@ ros2 launch my_robot_bringup mujoco.launch.py --show-args
 | `manipulation_config` | 抓放执行、TCP、运动配置 | `motion_control.launch.py` |
 | `planner_config` | 分拣策略、观察姿态、放置位置 | `motion_control.launch.py` |
 | `perception_config` | 图像/深度处理参数、话题及共享类别表路径 | 总入口、控制层的相机配置、`perception.launch.py` |
-| `class_config` | 可选覆盖类别、HSV 和各类标称尺寸 | `perception.launch.py` 统一传给两个节点 |
+| `class_config` | 可选覆盖类别、HSV 和各类标称尺寸 | 感知层和运动层传给各自节点 |
 
 `MoveItConfigsBuilder` 自动加载的 `kinematics.yaml`、`joint_limits.yaml`、`sensors_3d.yaml` 等默认来自安装的 MoveIt 配置包；它们不在上述六条路径内。修改这些源码配置后仍需重新构建或使用适当的符号链接安装，修改 Python/C++、URDF 等资源同样不能一概认为不需要构建。直接单独启动各层时，如果没有传路径，默认使用安装目录内的配置。
 
@@ -73,7 +73,7 @@ ros2 launch my_robot_bringup mujoco.launch.py --show-args
 | `planning_pipeline` | `ompl` | MoveIt 规划管线 |
 | `manipulation_config`、`planner_config`、`perception_config` | 各包配置 | 执行、任务规划和视觉配置 |
 
-独立 `ros2_control.launch.py` 默认使用世界包的 `basic/preview.xml`、相机配置和描述包的 `mjcf/control.xml`；其 `with_camera:=auto` 在完整世界发布 RGB-D，在 `robot_only:=true` 时关闭相机发布。可通过 `scene_file`、`model_path`、`camera_config`、`perception_config` 和相机话题参数覆盖默认值。`plugins_file` 可指定原生插件配置；`robot_description` 是可选的已展开描述。motion 的参数默认来自对应 YAML，perception 默认从 `perception.yaml` 取话题和阈值；单独启动 motion 需要已有控制和 MoveIt，单独启动 perception 需要已有图像输入。三个分层默认使用仿真时间；如果 perception 单独连接系统时间的外部相机，需要显式传入 `use_sim_time:=false`。
+独立 `ros2_control.launch.py` 默认使用世界包的 `basic/preview.xml`、相机配置和描述包的 `mjcf/control.xml`；其 `with_camera:=auto` 在完整世界发布 RGB-D，在 `robot_only:=true` 时关闭相机发布。可通过 `scene_file`、`model_path`、`camera_config` 和相机话题参数覆盖默认值。独立启动时相机默认使用 `/camera_sensor/` 话题；完整入口根据所选检测器的配置传入话题。`plugins_file` 可指定原生插件配置；`robot_description` 是可选的已展开描述。motion 的参数默认来自对应 YAML，perception 默认从 `perception.yaml` 取话题和阈值；单独启动 motion 需要已有控制和 MoveIt，单独启动 perception 需要已有图像输入。三个分层默认使用仿真时间；如果 perception 单独连接系统时间的外部相机，需要显式传入 `use_sim_time:=false`。
 
 `with_motion:=true with_moveit:=false` 和 `with_perception:=true with_motion:=false` 会明确报错。层级约束适用于总入口；独立的 `perception.launch.py` 可连接已有相机测试。
 
@@ -146,3 +146,7 @@ ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
 ## 放置规则参数
 
 `place_position_modes` 与 `place_positions` 可在总配置设置，或作为同名 launch 参数覆盖。启动层校验并传给 planner；不传给执行器做二次偏移。优先级为显式 launch 参数 > 总配置 > planner YAML > 节点默认。配置了显式规则时覆盖旧区域/槽位策略；所有层均未提供规则才使用显式类别区域/槽位；缺少规则的类别不抓取。`dry_run:=true` 仅打印有效规则、不启动节点；脚本提供 `--dry-run`。见 [放置规则说明](../../script/README.md#放置坐标规则与优先级)。
+
+抓取执行器与感知、Planner 读取同一类别表。PickPlace Goal 的 `class_id` 用于选择碰撞几何；0 表示手动目标，使用传入尺寸的盒体。box/cylinder/sphere 按表建模，其他类型用包围盒。固定向下抓取策略在 commander/config/manipulation.yaml 配置：默认张开 0.07 m，标称夹持 0.03 m，扣除 0.002 m 压缩量后闭合到 0.028 m。新类别仍需在总配置的 scenes 和 place_positions 中填写场景及放置规则。接口新增 class_id 后，相关节点需一起重新编译并重启。
+
+放置前检查夹爪从夹持宽度到释放宽度的碰撞采样状态。检查使用本地场景快照，将当前目标临时放到目标中心，不移动真实场景。`gripper_release_margin` 是释放时增加的总间隙，默认 0.006 m：3 cm 物体释放到 0.036 m；抓前仍张开到 0.07 m。正常放置和带载恢复共用释放宽度。检查覆盖放置位松爪空间，实际搬运、下降和撤离路径仍在执行时由 MoveIt 检查。

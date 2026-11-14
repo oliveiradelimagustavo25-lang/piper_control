@@ -65,7 +65,9 @@ def launch_setup(context):
     if argument('pick_place_action') and argument('action_name') and argument('pick_place_action') != argument('action_name'):
         raise ValueError('pick_place_action and legacy action_name disagree')
     named = argument('move_to_named_action') or execution.get('move_to_named_action', '/manipulation/move_to_named')
-    execution.update(action_name=pick, move_to_named_action=named)
+    execution.update(action_name=pick, move_to_named_action=named,
+                     perception_config=argument('perception_config'),
+                     class_config_override=argument('class_config'))
     planner.update(pick_place_action=pick, move_to_named_action=named, use_sim_time=True,
                    perception_config=argument('perception_config'),
                    class_config_override=argument('class_config'))

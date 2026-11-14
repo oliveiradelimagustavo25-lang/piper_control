@@ -8,6 +8,7 @@
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <moveit_msgs/msg/planning_scene.hpp>
 
 namespace my_robot_commander
 {
@@ -39,6 +40,10 @@ public:
   MotionController & operator=(const MotionController &) = delete;
 
   bool canReachPose(const geometry_msgs::msg::PoseStamped & pose);  // IK 粗查，不保证路径可行。
+  // 在场景快照中求放置位 IK，并检查夹爪从夹持到释放的采样状态；不执行运动。
+  bool canReleaseAt(const geometry_msgs::msg::PoseStamped & pose,
+    const std::vector<double> & closed, const std::vector<double> & released,
+    const moveit_msgs::msg::PlanningScene & scene);
   bool moveToNamedTarget(const std::string & name);
   bool moveToJoints(const std::vector<double> & joints);
   bool moveToPose(const geometry_msgs::msg::PoseStamped & pose, bool cartesian = false);

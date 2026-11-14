@@ -36,24 +36,26 @@ EXECUTION_ARGUMENTS = {
 
 # Class properties live in class_config; image/depth processing stays in perception_config.
 PERCEPTION_ARGUMENTS = {
-    'perception_config': 'Color and depth node parameters',
-    'class_config': 'Shared class catalog for color detection and depth localization',
+    'perception_config': 'Detector and depth node parameters',
+    'detector': '2D detector: cv or yolo',
+    'yolo_model': 'YOLO segmentation ONNX model path',
+    'class_config': 'Shared class catalog for detection and depth localization',
     'image_topic': 'RGB image input',
     'labels_topic': 'Class label image',
-    'debug_topic': 'Color debug image',
+    'debug_topic': 'Detector debug image',
     'depth_topic': 'Aligned depth image input',
     'camera_info_topic': 'Camera calibration input',
     'points_topic': 'Localized point cloud output',
     'objects_topic': 'Detected objects output',
-    'show_window': 'Show color debug window',
-    'publish_debug': 'Publish color debug image',
+    'show_window': 'Show detector debug window',
+    'publish_debug': 'Publish detector debug image',
 }
 
 
 # File paths in the external configuration are relative to that YAML file.
 CONFIG_PATHS = {
     'scene_file', 'robot_model', 'camera_config', 'controllers_file',
-    'moveit_controllers_file', 'manipulation_config', 'planner_config', 'perception_config', 'class_config',
+    'moveit_controllers_file', 'manipulation_config', 'planner_config', 'perception_config', 'class_config', 'yolo_model',
 }
 CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATHS | {
     'headless', 'with_moveit', 'with_rviz', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
@@ -150,11 +152,23 @@ def include_layer(bringup, filename, arguments):
     )
 
 
-def control_layer(bringup, argument):
+def camera_topics(config, detector, argument):
+    shared = config.get('/**', {}).get('ros__parameters', {})
+    executable = 'color_detector' if detector == 'cv' else 'yolo_detector'
+    detection = {**shared, **config[executable]['ros__parameters']}
+    depth = {**shared, **config['depth_localizer']['ros__parameters']}
+    return {
+        'image_topic': argument('image_topic') or detection.get('image_topic', '/camera_sensor/image_raw'),
+        'depth_topic': argument('depth_topic') or depth.get('depth_topic', '/camera_sensor/depth/image_raw'),
+        'camera_info_topic': argument('camera_info_topic') or depth.get('camera_info_topic', '/camera_sensor/camera_info'),
+    }
+
+
+def control_layer(bringup, argument, topics):
     names = ('headless', 'sim_speed_factor', 'controllers_file', 'with_moveit', 'with_camera',
-             'planning_pipeline', 'moveit_controllers_file', 'scene_file', 'camera_config',
-             'perception_config', 'image_topic', 'depth_topic', 'camera_info_topic')
+             'planning_pipeline', 'moveit_controllers_file', 'scene_file', 'camera_config')
     arguments = {name: argument(name) for name in names}
+    arguments.update(topics)
     arguments['model_path'] = argument('robot_model')
     return include_layer(bringup, 'ros2_control.launch.py', arguments)
 
@@ -204,6 +218,11 @@ def launch_setup(context):
     if with_perception and not with_motion:
         raise ValueError('with_perception:=true requires with_motion:=true')
     bringup = Path(get_package_share_directory('my_robot_bringup'))
+    perception_config = yaml.safe_load(Path(argument('perception_config')).read_text())
+    detector = argument('detector') or perception_config.get('/**', {}).get('ros__parameters', {}).get('detector', 'cv')
+    if detector not in ('cv', 'yolo'):
+        raise ValueError('detector must be cv or yolo')
+    context.launch_configurations['detector'] = detector
 
     catalog_path = scene_config().catalog_file(argument('perception_config'), argument('class_config'))
     context.launch_configurations['class_config'] = str(catalog_path)
@@ -223,7 +242,6 @@ def launch_setup(context):
     # standalone planner use its own configured object source.
     objects_topic = argument('objects_topic')
     if with_perception and not objects_topic:
-        perception_config = yaml.safe_load(Path(argument('perception_config')).read_text())
         objects_topic = perception_config['depth_localizer']['ros__parameters']['objects_topic']
     layers = []
     runtime = context.launch_configurations.get('_piper_scene_runtime')
@@ -235,9 +253,9 @@ def launch_setup(context):
         planner = placement_config().resolve(planner, argument('place_position_modes'), argument('place_positions'))
         execution = yaml.safe_load(Path(argument('manipulation_config')).read_text())['pick_place_executor']['ros__parameters']
         frame = argument('reference_frame') or execution.get('reference_frame', 'base_link')
-        return layers + [LogInfo(msg=line) for line in placement_config().describe(
+        return layers + [LogInfo(msg=f'Detector: {detector}; common depth localization')] + [LogInfo(msg=line) for line in placement_config().describe(
             planner, frame, scene_config().load_catalog(catalog_path))]
-    layers.append(control_layer(bringup, argument))
+    layers.append(control_layer(bringup, argument, camera_topics(perception_config, detector, argument)))
     if with_motion:
         layers.append(motion_layer(bringup, argument, objects_topic))
     if with_perception:
@@ -271,7 +289,7 @@ def generate_launch_description():
         config_argument('with_motion', default_value=LaunchConfiguration('with_executor'),
                               choices=['true', 'false'], description='Start executor and task planner'),
         config_argument('with_perception', default_value=LaunchConfiguration('with_motion'),
-                              choices=['true', 'false'], description='Start color detection and depth localization'),
+                              choices=['true', 'false'], description='Start selected detection and depth localization'),
         config_argument('with_camera', default_value=LaunchConfiguration('with_perception'),
                               choices=['true', 'false'], description='Publish MuJoCo RGB, depth and camera info'),
         config_argument('sim_speed_factor', default_value='1.0',

@@ -76,9 +76,9 @@ export ROS_DOMAIN_ID=227
 
 `clear.sh` 是入口，进程识别位于 `script/build/clear_processes.py`，只使用 Python 标准库，无需加载 ROS 环境。默认使用当前 `ROS_DOMAIN_ID`，未设置时为域 0。
 
-清理范围同时满足当前用户、工作目录在本工作区内、ROS 域匹配，以及属于已知启动链。识别两种残留：节点直接被 init/用户 systemd 接管；或者 `my_robot_bringup` 的已知 launch 被接管、它下面的节点仍由这个 launch 管理。后一种情况正是“node list 还有很多节点，但旧 clear 什么都找不到”的原因。
+清理范围同时满足当前用户、工作目录在本工作区内、ROS 域匹配，以及属于已知启动链。识别两种残留：节点直接被 init/用户 systemd 接管；或者 `my_robot_bringup` / `my_robot_perception` 的已知 launch 被接管、它下面的节点仍由这个 launch 管理。后一种情况正是“node list 还有很多节点，但旧 clear 什么都找不到”的原因。
 
-覆盖机器人状态、MuJoCo 控制、spawner、MoveIt、抓放执行器、task_planner 和感知节点。RViz 只随选中的孤立 launch 清理，不单独清理。仍受正常活动启动链管理的任务、其他工作区和其他域不处理；可在对应终端正常退出。
+覆盖机器人状态、MuJoCo 控制、spawner、MoveIt、抓放执行器、task_planner，以及 CV、depth、ArUco 和 YOLO 感知节点。RViz 只随选中的孤立 launch 清理，不单独清理。仍受正常活动启动链管理的任务、其他工作区和其他域不处理；可在对应终端正常退出。
 
 先只向孤立 launch/独立孤立节点发送一次 SIGINT，等待 10 秒；随后对仍存活的所选进程依次发送 TERM、KILL。每次发送前检查 PID 启动时间、域、目录和可执行文件，降低 PID 复用造成误伤的风险；僵尸进程不算仍运行的节点。最终核验所选 PID 已退出，不停止 ROS daemon。
 
@@ -99,6 +99,17 @@ kill -KILL <PID>
 节点列表依赖 ROS 域和 DDS 发现，进程退出后名字可能暂时仍出现在列表中，也可能来自同域其他机器。可以用 `ros2 node list --no-daemon`、`ros2 node info /robot_state_publisher --no-daemon` 进一步检查，并结合 `ps` 判断本机进程是否还在。不要直接按名称全局 `pkill`，以免影响其他项目。
 
 ## 场景与一键启动
+
+检测器可在总配置中选 `detector: cv`（默认）或 `detector: yolo`。
+YOLO 的外部工具与 ROS 适配节点需要预先分别构建，模型需包含项目所用类别，见
+[tools/yolo/README.md](../tools/yolo/README.md)。入口不变，也可临时覆盖：
+
+```bash
+./script/pick_three_colors.sh -- detector:=yolo yolo_model:=/absolute/path/sorting.onnx
+```
+
+`yolo_model` 总配置路径相对于总 YAML，显式命令行相对于当前目录；未提供则使用感知 YAML 的
+`yolo_detector.model_path`，该路径相对于感知 YAML。选择 CV 时无需配置模型。
 
 只需修改 [config/mujoco_launch.yaml](../config/mujoco_launch.yaml)，然后运行：
 

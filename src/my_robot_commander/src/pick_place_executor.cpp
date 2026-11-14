@@ -104,11 +104,15 @@ public:
     clearance_ = parameter(node_, "release_clearance", 0.002);
     retreat_ = parameter(node_, "retreat_distance", 0.04);
     open_width_ = parameter(node_, "gripper_open_width", 0.07);
+    grasp_width_ = parameter(node_, "gripper_grasp_width", 0.03);
+    release_margin_ = parameter(node_, "gripper_release_margin", 0.006);
     compression_ = parameter(node_, "gripper_compression", 0.002);
     signs_ = parameter<std::vector<double>>(node_, "gripper_joint_signs", {1.0, -1.0});
     max_age_ = parameter(node_, "max_target_age", 5.0);
     tf_timeout_ = parameter(node_, "tf_timeout", 0.3);
     if (signs_.size() != 2 || open_width_ <= 0 || compression_ < 0 ||
+      !std::isfinite(grasp_width_) || grasp_width_ <= 0 || grasp_width_ >= open_width_ ||
+      !std::isfinite(release_margin_) || release_margin_ <= 0 ||
       approach_ <= 0 || lift_ <= 0 || retreat_ <= 0 || clearance_ < 0)
     {
       throw std::invalid_argument("Invalid gripper configuration or approach/lift/retreat distances");
@@ -182,9 +186,8 @@ public:
               throw std::runtime_error("Cannot reach recovery placement; load retained");
             }
           }
-          std::vector<double> joints;
-          for (const auto sign : signs_) {joints.push_back(sign * open_width_ / 2.0);}
-          if (!motion_->moveGripperToJoints(joints)) {throw std::runtime_error("Opening gripper failed");}
+          const double width = holding_ || scene_->holding() ? recovery_release_width_ : open_width_;
+          if (!motion_->moveGripperToJoints(gripperJoints(width))) {throw std::runtime_error("Opening gripper failed");}
           if (scene_->holding()) {scene_->release();}
           holding_ = false;
           scene_->restoreTouch();
@@ -205,6 +208,13 @@ public:
   }
 
 private:
+  std::vector<double> gripperJoints(double width) const
+  {
+    std::vector<double> joints;
+    for (const auto sign : signs_) {joints.push_back(sign * width / 2.0);}
+    return joints;
+  }
+
   // Cache perception callbacks; apply a consistent snapshot before each motion.
   void syncScene()
   {
@@ -299,11 +309,7 @@ private:
       return motion_->moveToPose(toolPose(tcp, tool_rotation_, tool_to_tcp_, frame_), cartesian);
     };
     const auto grip = [&](double width) {
-      std::vector<double> joints;
-      for (const auto sign : signs_) {
-        joints.push_back(sign * width / 2.0);
-      }
-      const bool moved = motion_->moveGripperToJoints(joints);
+      const bool moved = motion_->moveGripperToJoints(gripperJoints(width));
       if (moved) {gripper_open = std::abs(width - open_width_) < 1e-6;}
       return moved;
     };
@@ -324,6 +330,9 @@ private:
       if (width >= open_width_) {
         throw std::runtime_error("Object is wider than configured gripper opening");
       }
+      const double closed_width = std::max(0.0, grasp_width_ - compression_);
+      const double release_width = std::min(open_width_, std::max(width, grasp_width_) + release_margin_);
+      recovery_release_width_ = release_width;
       const tf2::Vector3 pick = tf2::Vector3(object.pose.position.x,
         object.pose.position.y, object.pose.position.z) + offset_;
       const tf2::Vector3 put = tf2::Vector3(place.pose.position.x,
@@ -344,23 +353,27 @@ private:
       recovery_available_ = true;
 
       syncScene();
-      scene_->prepare(goal->object_id, object, goal->object_dimensions);
+      scene_->prepare(goal->object_id, object, goal->object_dimensions, goal->class_id);
 
       stage(Action::Feedback::PICKING, "Opening, approaching and gripping " + goal->object_id);
       step("Open gripper", [&]() { return grip(open_width_); });
+      auto placed_object = place;
+      placed_object.pose.position.z += clearance_;
       if (!motion_->canReachPose(toolPose(pre_place, tool_rotation_, tool_to_tcp_, frame_)) ||
-        !motion_->canReachPose(toolPose(put, tool_rotation_, tool_to_tcp_, frame_)))
+        !motion_->canReleaseAt(toolPose(put, tool_rotation_, tool_to_tcp_, frame_),
+          gripperJoints(closed_width), gripperJoints(release_width), scene_->placementScene(placed_object)))
       {
         result->unreachable_placement = true;
-        throw std::runtime_error("Placement IK unavailable; choose another position before picking");
+        throw std::runtime_error("Placement IK or release space unavailable; choose another position before picking");
       }
+      RCLCPP_INFO(node_->get_logger(), "Placement release checked: width=%.4f m", release_width);
       step("Move to pre-grasp", [&]() { return move(pre_pick, false); });
       step("Descend to grasp", [&]() { return move(pick, true); });
       step("Close gripper", [&]() {
         // The MoveIt attachment is a planning model, not proof of a physical grasp.
         scene_->attach();
         holding_ = true;
-        return grip(std::max(0.0, width - compression_));
+        return grip(closed_width);
       });
 
       stage(Action::Feedback::TRANSFERRING, "Lifting and transferring");
@@ -370,7 +383,8 @@ private:
       stage(Action::Feedback::PLACING, "Lowering, releasing and retreating");
       step("Descend to place", [&]() { return move(put, true); });
       step("Release object", [&]() {
-        if (!grip(open_width_)) {return false;}
+        if (!grip(release_width)) {return false;}
+        gripper_open = true;  // 足够释放当前物体即可，不要求全开。
         scene_->release();
         holding_ = false;
         result->released = true;
@@ -426,7 +440,8 @@ private:
   tf2::Quaternion tool_rotation_;
   std::vector<double> signs_;
   double approach_, lift_, transport_z_, clearance_, retreat_;
-  double open_width_, compression_, max_age_, tf_timeout_;
+  double open_width_, grasp_width_, compression_, release_margin_, max_age_, tf_timeout_;
+  double recovery_release_width_ = 0;
 };
 
 int main(int argc, char ** argv)

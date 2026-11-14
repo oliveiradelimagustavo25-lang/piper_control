@@ -4,15 +4,20 @@ headless: false
 show_window: true
 with_rviz: false  # true：随主入口打开 MoveIt RViz
 sim_speed_factor: 1.0
+# 只启动一种检测器，共用 depth 与 Planner。YOLO 需单独构建工具库和 ROS 适配节点。
+detector: cv
+# 相对于本 YAML；显式命令行 yolo_model 覆盖此路径，其次才用 perception.yaml 的 model_path。
+# yolo_model: ../tools/yolo/models/artifacts/sorting.onnx
 
 # 按类别 ID 放置实例；形状、尺寸、颜色来自共同类别表，坐标单位 m。
 # scenes 未填写/null：使用类别表的默认位置；显式映射仅生成列出的类别，[] 为零个。
 # 未定义类别或不支持的模型会被跳过并报告，其他实例继续生成。
 scenes:
-  1: [[0.32, -0.12, 0.03], [0.32, -0.04, 0.03]]
+  1: [[0.32, -0.12, 0.03]]
   2: [[0.32, 0.04, 0.03]]
   3: []
   4: [[0.32, 0.12, 0.03]]
+  5: [[0.32, -0.04, 0.03]]
 
 # 按 X/Y/Z 逐轴选择 relative（相对物体首次派发中心）或 absolute（reference_frame 绝对中心）。
 # 显式配置覆盖 planner YAML 的放置点/区域；删除这两项才使用 planner 的显式类别区域/槽位。
@@ -20,8 +25,9 @@ place_position_modes: [relative, relative, relative]
 place_positions:
   1: [-0.050, -0.010, 0.0005]
   2: [-0.050, -0.010, 0.0005]
-  3: [-0.050, -0.010, 0.0005]
-  4: [-0.050, -0.010, 0.0005]
+  3: [0.050, -0.010, 0.0005]
+  4: [0.050, -0.010, 0.0005]
+  5: [0.050, -0.010, 0.0005]
 # 混合示例（非当前值）：modes=[relative, absolute, absolute]，1=[-0.24,-0.06,-0.12]
 # 目标 = [红块首次派发 x - 0.24, -0.06, -0.12]。全 absolute 即绝对放置点。
 # Z 为物体中心或中心偏移，不是桌面/TCP；桌面 -0.145、块高 0.03 时中心为 -0.130 m。
@@ -41,7 +47,7 @@ moveit_controllers_file: ../src/my_robot_moveit_pkg/config/moveit_controllers.ya
 manipulation_config: ../src/my_robot_commander/config/manipulation.yaml
 planner_config: ../src/my_robot_planner/config/task_planner.yaml
 perception_config: ../src/my_robot_perception/config/perception.yaml
-# 不填写时，按 perception_config 中的共享配置查表；设置后同时覆盖 CV 和 depth。
+# 不填写时，按 perception_config 中的共享配置查表；设置后覆盖检测器、depth、Planner 与执行器碰撞层。
 # class_config: ../src/my_robot_perception/config/object_classes.yaml
 
 # 可选的世界与规划配置（未设置时使用安装目录中的默认资源）。

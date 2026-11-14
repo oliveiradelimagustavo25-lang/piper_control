@@ -1,6 +1,6 @@
 # 类别定义的唯一来源；id 是类别，不是场景实例编号，也不代表物体数量。
 # mono8 标签图：0=背景，1..255=类别；列表顺序决定 CV 阈值重叠时的优先级。
-# 当前 CV 只按颜色识别，depth 只支持顶部可见的平放 box；尺寸为标称完整边长，m。
+# 当前 CV 只按颜色识别；depth 统一掩码定位，按标称半高估计中心，尺寸单位 m。
 # simulation.default_position 仅在 scenes 未填写/null 时使用；新类别不必设置默认生成位置。
 classes:
   - id: 1
@@ -51,3 +51,36 @@ classes:
     cv:
       hsv_lower: [20, 100, 50]
       hsv_upper: [34, 255, 255]
+
+  # 类别与仿真几何定义；同色不同形状使用 YOLO 区分，depth 不按几何类型过滤。
+  - id: 5
+    name: red_cylinder
+    color: red
+    geometry:
+      type: cylinder
+      dimensions: [0.03, 0.03, 0.03]  # 直径 X/Y、高 Z，m
+
+  - id: 6
+    name: blue_cylinder
+    color: blue
+    geometry:
+      type: cylinder
+      dimensions: [0.03, 0.03, 0.03]
+
+  - id: 7
+    name: green_cylinder
+    color: green
+    simulation:
+      rgba: [0.0, 1.0, 0.0, 1.0]
+    geometry:
+      type: cylinder
+      dimensions: [0.03, 0.03, 0.03]
+
+  - id: 8
+    name: yellow_cylinder
+    color: yellow
+    simulation:
+      rgba: [1.0, 1.0, 0.0, 1.0]
+    geometry:
+      type: cylinder
+      dimensions: [0.03, 0.03, 0.03]

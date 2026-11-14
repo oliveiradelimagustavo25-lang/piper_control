@@ -16,8 +16,13 @@ NODE_PATHS = (
     '/lib/my_robot_planner/task_planner',
     '/lib/my_robot_perception/color_detector',
     '/lib/my_robot_perception/depth_localizer',
+    '/lib/my_robot_perception/yolo_detector',
 )
 LAUNCH_FILES = {'mujoco.launch.py', 'ros2_control.launch.py', 'motion_control.launch.py', 'perception.launch.py'}
+PERCEPTION_LAUNCH_FILES = {
+    'aruco_detector.launch.py', 'color_detector.launch.py',
+    'depth_localizer.launch.py', 'yolo_detector.launch.py',
+}
 
 
 @dataclass
@@ -47,9 +52,13 @@ def read_process(pid):
         if not args:
             return None
         executable = args[0]
-        if (Path(executable).name == 'ros2' and len(args) >= 4 and
-                args[1:3] == ['launch', 'my_robot_bringup'] and args[3] in LAUNCH_FILES):
-            kind = 'launch'
+        if Path(executable).name == 'ros2' and len(args) >= 4 and args[1] == 'launch':
+            package, launch_file = args[2:4]
+            if ((package == 'my_robot_bringup' and launch_file in LAUNCH_FILES) or
+                    (package == 'my_robot_perception' and launch_file in PERCEPTION_LAUNCH_FILES)):
+                kind = 'launch'
+            else:
+                return None
         elif executable.endswith(NODE_PATHS):
             kind = 'node'
         elif executable.endswith('/lib/rviz2/rviz2'):

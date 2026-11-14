@@ -37,7 +37,9 @@ pick_place_executor:
 
     # 当前 Piper 两个手指：joint7=q，joint8=-q，开口宽度约为 2*q。
     gripper_open_width: 0.07
-    gripper_compression: 0.002   # 总开口比物块小 2 mm，每侧 1 mm 的目标余量形成夹持力
+    gripper_grasp_width: 0.03    # 统一标称夹持宽度，m；实际闭合目标再减 compression
+    gripper_compression: 0.002   # 闭合目标 = gripper_grasp_width - 本值，当前为 0.028 m
+    gripper_release_margin: 0.006 # 释放总开口 = 物体投影宽度/默认夹持宽度的较大值 + 此间隙，上限 open_width
     gripper_joint_signs: [1.0, -1.0]  # 顺序必须对应 gripper 组的变量顺序
 
     max_target_age: 5.0          # 有时间戳的观测允许年龄，s；零时间戳用于手动目标

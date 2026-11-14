@@ -48,13 +48,11 @@ public:
     target_frame_ = declare_parameter<std::string>("target_frame", "");
     objects_frame_ = declare_parameter<std::string>("objects_frame", "base_link");
     classes_ = my_robot_perception::loadCatalog(*this);
-    top_tolerance_ = declare_parameter<double>("top_surface_tolerance", 0.002);
     tf_timeout_ = declare_parameter<double>("tf_timeout", 0.1);
     if (objects_frame_.empty() ||
-      !std::isfinite(top_tolerance_) || top_tolerance_ <= 0 ||
       !std::isfinite(tf_timeout_) || tf_timeout_ < 0)
     {
-      throw std::invalid_argument("Invalid object frame or top surface tolerance");
+      throw std::invalid_argument("Invalid object frame or TF timeout");
     }
     match_distance_ = declare_parameter<double>("track_match_distance", 0.025);
     ambiguity_margin_ = declare_parameter<double>("track_ambiguity_margin", 0.003);
@@ -69,10 +67,11 @@ public:
     min_pixels_ = declare_parameter<int>("min_valid_pixels", 5);
     erosion_size_ = declare_parameter<int>("erosion_kernel", 1);
     const double sync_slop = declare_parameter<double>("sync_slop", 0.03);
+    const int sync_queue_size = declare_parameter<int>("sync_queue_size", 30);
     if (!std::isfinite(min_depth_) || !std::isfinite(max_depth_) ||
       !std::isfinite(depth_tolerance_) || !std::isfinite(sync_slop) ||
       min_depth_ <= 0 || max_depth_ <= min_depth_ || depth_tolerance_ <= 0 ||
-      min_pixels_ < 1 || erosion_size_ < 1 || erosion_size_ % 2 == 0 || sync_slop <= 0)
+      min_pixels_ < 1 || erosion_size_ < 1 || erosion_size_ % 2 == 0 || sync_slop <= 0 || sync_queue_size < 1)
     {
       throw std::invalid_argument("Invalid depth, pixel count, erosion or sync parameters");
     }
@@ -85,11 +84,11 @@ public:
       info_topic, rclcpp::SensorDataQoS(),
       [this](sensor_msgs::msg::CameraInfo::ConstSharedPtr info) { info_ = info; });
 
-    // 按采集时间匹配；颜色标签图保留了原 RGB 图的时间戳。
+    // 按采集时间匹配；检测器保留原 RGB 时间戳，队列容纳推理延迟。
     labels_sub_.subscribe(this, labels_topic, rmw_qos_profile_sensor_data);
     depth_sub_.subscribe(this, depth_topic, rmw_qos_profile_sensor_data);
     sync_ = std::make_shared<message_filters::Synchronizer<SyncPolicy>>(
-      SyncPolicy(10), labels_sub_, depth_sub_);
+      SyncPolicy(sync_queue_size), labels_sub_, depth_sub_);
     sync_->setMaxIntervalDuration(rclcpp::Duration::from_seconds(sync_slop));
     sync_->registerCallback(std::bind(
       &DepthLocalizer::localize, this, std::placeholders::_1, std::placeholders::_2));
@@ -235,10 +234,6 @@ private:
       for (const auto & definition : classes_) {
         if (!present.count(definition.id)) {continue;}
         const auto class_name = "class " + std::to_string(definition.id);
-        if (definition.geometry != "box") {
-          issue(class_name + ": localization unsupported for " + definition.geometry);
-          continue;
-        }
         cv::Mat mask = labels->image == definition.id;
         if (erosion_size_ > 1) {
           cv::erode(mask, mask, cv::getStructuringElement(
@@ -268,12 +263,10 @@ private:
           }
           const float center_depth = median(depths);
           std::vector<float> inliers;
-          std::vector<cv::Point2d> inlier_pixels;
           cv::Point2d uv(0, 0);
           for (size_t i = 0; i < depths.size(); ++i) {
             if (std::abs(depths[i] - center_depth) <= depth_tolerance_) {
               inliers.push_back(depths[i]);
-              inlier_pixels.emplace_back(valid_pixels[i].x, valid_pixels[i].y);
               uv += cv::Point2d(valid_pixels[i].x, valid_pixels[i].y);
             }
           }
@@ -291,51 +284,22 @@ private:
           points.emplace_back(ray[0].x * z, ray[0].y * z, z);
           class_ids.push_back(static_cast<uint8_t>(definition.id));
 
-          // 类别图由任意检测器提供；当前几何方法处理已知尺寸的平放 box。
-          const int area = stats.at<int>(id, cv::CC_STAT_AREA);
+          // 统一掩码定位：有效像素中心 + 深度中值。标称半高将表面点换为近似中心。
+          // 假设物体直立、顶部可见；遮挡和侧面占比高时中心可能偏移。
           if (objects_tf_ready) {
-            std::vector<cv::Point2d> rays;
-            cv::undistortPoints(inlier_pixels, rays, camera_matrix,
-              distorted ? cv::Mat(info_->d) : cv::Mat());
-            std::vector<tf2::Vector3> surface;
-            std::vector<float> heights;
-            for (size_t i = 0; i < rays.size(); ++i) {
-              const auto point = camera_to_objects * tf2::Vector3(
-                rays[i].x * inliers[i], rays[i].y * inliers[i], inliers[i]);
-              surface.push_back(point);
-              heights.push_back(point.z());
-            }
-            std::sort(heights.begin(), heights.end());
-            const double upper_z = heights[heights.size() * 9 / 10];
-            tf2::Vector3 lower(1e9, 1e9, 0), upper(-1e9, -1e9, 0);
-            std::vector<float> top_heights;
-            for (const auto & point : surface) {
-              if (std::abs(point.z() - upper_z) <= top_tolerance_) {
-                lower.setX(std::min(lower.x(), point.x()));
-                lower.setY(std::min(lower.y(), point.y()));
-                upper.setX(std::max(upper.x(), point.x()));
-                upper.setY(std::max(upper.y(), point.y()));
-                top_heights.push_back(point.z());
-              }
-            }
-            RCLCPP_DEBUG(get_logger(), "class=%u area=%d surface=%zu top=%zu upper_z=%.5f",
-              definition.id, area, surface.size(), top_heights.size(), upper_z);
-            if (top_heights.size() >= static_cast<size_t>(min_pixels_)) {
-              my_robot_interface::msg::DetectedObject object;
-              object.class_id = definition.id;
-              object.color = definition.color;
-              object.dimensions.x = definition.dimensions[0];
-              object.dimensions.y = definition.dimensions[1];
-              object.dimensions.z = definition.dimensions[2];
-              object.pose.position.x = (lower.x() + upper.x()) / 2;
-              object.pose.position.y = (lower.y() + upper.y()) / 2;
-              // objects_frame 的 Z 轴向上；上表面高度减半高得到物体中心。
-              object.pose.position.z = median(top_heights) - object.dimensions.z / 2;
-              object.pose.orientation.w = 1.0;
-              objects.objects.push_back(object);
-            } else {
-              issue(class_name + ": insufficient top surface");
-            }
+            const auto center = camera_to_objects * tf2::Vector3(
+              points.back().x, points.back().y, points.back().z);
+            my_robot_interface::msg::DetectedObject object;
+            object.class_id = definition.id;
+            object.color = definition.color;
+            object.dimensions.x = definition.dimensions[0];
+            object.dimensions.y = definition.dimensions[1];
+            object.dimensions.z = definition.dimensions[2];
+            object.pose.position.x = center.x();
+            object.pose.position.y = center.y();
+            object.pose.position.z = center.z() - object.dimensions.z / 2;
+            object.pose.orientation.w = 1.0;
+            objects.objects.push_back(object);
           }
         }
       }
@@ -404,7 +368,7 @@ private:
   std::vector<my_robot_perception::ObjectClass> classes_;
   double match_distance_, ambiguity_margin_;
   std::string target_frame_, objects_frame_;
-  double min_depth_, max_depth_, depth_tolerance_, top_tolerance_, tf_timeout_;
+  double min_depth_, max_depth_, depth_tolerance_, tf_timeout_;
   int min_pixels_, erosion_size_;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr info_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;

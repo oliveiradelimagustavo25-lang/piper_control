@@ -11,3 +11,11 @@ docs/
 
 # script/build contains source helpers; only generated caches stay ignored.
 /script/build/runtime/
+
+# External processing tools: keep code, packaging and model records in Git.
+/tools/*/.venv/
+/tools/*/.deps/
+/tools/*/data/
+/tools/*/runs/
+/tools/*/models/artifacts/
+/tools/*/models/*.pt

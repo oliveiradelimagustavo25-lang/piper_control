@@ -74,7 +74,7 @@ def main():
     for key,positions in requested.items():
         cid=int(key)
         assert cid in catalog, f'Undefined requested class {cid}; normal physical probe expects no skips'
-        assert catalog[cid]['geometry']['type']=='box', 'Physical probe covers flat boxes only'
+        assert catalog[cid]['geometry']['type'] in ('box', 'cylinder'), 'Physical probe covers upright boxes/cylinders'
         for position in positions:
             source=list(position)
             source[2]=catalog[cid]['geometry']['dimensions'][2]/2

@@ -87,11 +87,16 @@ python3 test/probes/check_planning_scene.py --recovery
 
 ## 自适应分拣
 
-`python3 test/probes/check_class_catalog.py` 运行真实 CV 和 depth，验证默认三色四实例，以及显式覆盖为非连续类别编号后的颜色映射、各类标称尺寸、中心高度和原图时间戳；同时检查类别表文件相对路径及总入口优先级。这是正常数据流验证，不包含新的故障注入。
+`python3 test/probes/check_class_catalog.py` 运行真实 CV 和 depth，验证默认四色五实例，以及显式覆盖为非连续类别编号后的颜色映射、各类标称尺寸、中心高度和原图时间戳；同时检查类别表文件相对路径及总入口优先级。这是正常数据流验证，不包含新的故障注入。
+
+`python3 test/probes/check_yolo_adapter.py` 需要可导入 `onnx`，并先构建外部 YOLO SDK 和 ROS 适配节点。
+它用输入相关的微型 ONNX 图验证两种输出布局、独立工具、原图掩膜、通道转换、类别映射、
+配置优先级、空观测，以及 CV/YOLO 对接同一个真实 depth 节点，不启动机械臂。
+这些小图是协议测试夹具，不代表已训练的 YOLO 模型或识别精度。
 
 `probes/check_multi_object_perception.py` 使用合成标签/深度检查多实例、移动、重现、歧义和 TF 异常；`probes/check_adaptive_planner.py` 用模拟执行器检查缺色、重试、抓空核验、ROI、重现优先级及取消，不证明物理抓取。
 
-`check_scene_config.py` 离线检查总配置场景生成与默认/优先级语义。`xvfb-run -a python3 test/probes/check_multi_object_sorting.py` 直接运行唯一 `.sh` 入口；可用 `--count 2=4`、`--count 1=3 --count 2=1 --count 3=1` 生成临时测试输入，也可直接测试 `--config` 指定的总配置。测试不传 XML，验收数量直接从请求输入推导，并按 class_id 核验，不从生成 XML 或颜色前缀反推。每次使用空闲独立 ROS 域，可用 `--ros-domain-id` 覆盖。详细配置与局限见 [planner 说明](../src/my_robot_planner/README.md)。
+`check_scene_config.py` 离线检查总配置场景生成与默认/优先级语义。`xvfb-run -a python3 test/probes/check_multi_object_sorting.py` 直接运行唯一 `.sh` 入口；可用 `--count 2=4`、`--count 1=3 --count 2=1 --count 3=1` 生成临时测试输入，也可直接测试 `--config` 指定的总配置。测试不传 XML，验收数量直接从请求输入推导，并按 class_id 核验，不从生成 XML 或颜色前缀反推。每次使用空闲独立 ROS 域，可用 `--ros-domain-id` 覆盖。探针支持直立方块和圆柱；同色不同形状需在传入配置中选择 YOLO 并指定匹配的模型。详细配置与局限见 [planner 说明](../src/my_robot_planner/README.md)。
 
 `python3 test/probes/check_clear_processes.py` 离线检查清理选择边界，不创建或终止任何节点；覆盖孤立 launch 连带节点、正常 launch 保留、跨域/跨目录排除与 RViz 范围。
 
