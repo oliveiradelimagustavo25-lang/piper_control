@@ -9,8 +9,8 @@ pick_place_executor:
     objects_topic: /perception/objects
     touch_links: [link7, link8]
 
-    # 与 preview.xml 地面和 objects/aruco_board.xml 的尺寸、位姿保持一致。
-    scene_boxes: [ground, aruco_board]
+    # 与 preview.xml 保持一致：marker 板暂时屏蔽；恢复时同时启用 XML include 和此列表。
+    scene_boxes: [ground]
     scene.ground.size: [4.0, 4.0, 0.02]
     scene.ground.position: [0.0, 0.0, -0.01]
     scene.ground.rpy: [0.0, 0.0, 0.0]

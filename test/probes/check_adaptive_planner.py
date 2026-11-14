@@ -317,10 +317,10 @@ def main():
         partial={'place_position_modes':['relative']*3,'place_positions.1':[-0.05,-0.01,0.0005]}
         calls,outcome=run_case(cell,'missing_class_rule',[red,green],overrides=partial,expected=False)
         assert [g.object_id for g in calls]==['red_1'] and 'no applicable placement rule' in outcome.message
-        unknown=obj('unknown_4',4,0.4,0.12)
-        calls,outcome=run_case(cell,'unknown_class',[red,unknown],overrides={**partial,'place_positions.4':[0,0,0]},expected=False)
+        unknown=obj('unknown_249',249,0.4,0.12)
+        calls,outcome=run_case(cell,'unknown_class',[red,unknown],overrides={**partial,'place_positions.249':[0,0,0]},expected=False)
         assert len(calls)==1 and 'undefined class' in outcome.message
-        calls,outcome=run_case(cell,'unknown_rule_no_fallback',[red],overrides={'place_positions.4':[0.2,0.0,0.005]},expected=False)
+        calls,outcome=run_case(cell,'unknown_rule_no_fallback',[red],overrides={'place_positions.249':[0.2,0.0,0.005]},expected=False)
         assert not calls and 'no applicable placement rule' in outcome.message
         calls,outcome=run_case(cell,'incomplete_perception',[red],overrides=partial,
             issues=['undefined class 10'],expected=False)
@@ -328,11 +328,11 @@ def main():
 
         catalog=yaml.safe_load((ROOT/'src/my_robot_perception/config/object_classes.yaml').read_text())
         fourth=copy.deepcopy(catalog['classes'][0])
-        fourth.update(id=4,name='other_red_box')
+        fourth.update(id=250,name='other_red_box')
         catalog['classes'].append(fourth)
         catalog_path=ROOT/'log/adaptive_planner/classes.yaml'
         catalog_path.write_text(yaml.safe_dump(catalog))
-        alien=obj('other_red',4,0.4,0.12)
+        alien=obj('other_red',250,0.4,0.12)
         alien.color=1
         def wrong_class_at_goal(goal,attempt):
             placed=copy.deepcopy(alien)
@@ -340,7 +340,8 @@ def main():
             cell.scene=[placed]
             return 'empty'
         calls,outcome=run_case(cell,'same_color_wrong_class',[red],wrong_class_at_goal,
-            overrides={**partial,'class_config_override':str(catalog_path)},expected=False)
+            overrides={**partial,'class_config_override':str(catalog_path)},
+            cancel_when=lambda _:len(cell.calls)==1 and cell.frame_count>=35)
         assert len(calls)==1 and 'verified/completed=0' in outcome.message
 
         alternate=copy.deepcopy(catalog)
@@ -368,6 +369,34 @@ def main():
             overrides={'place_positions.1':[0.26,0.0,0.005],'place_positions.2':[0.30,0.0,0.005],
                        'slot_clearance':0.0,'placement_verification':'motion'},
             cancel_when=lambda _:len(cell.calls)==1 and cell.frame_count>=30)
+        assert len(calls)==1
+        # 水平与高度分别在容差内，即使三维合成距离超限也应核验成功。
+        def diagonal_error(goal, attempt):
+            cell.move_object(goal)
+            cell.scene[0].pose.position.x += .009
+            cell.scene[0].pose.position.z += .005
+            return 'empty'  # 保留手工扰动后的观测，不让模拟执行器再次覆盖位姿。
+        calls,_=run_case(cell,'separate_xy_height',[red],diagonal_error,expected=True)
+        assert len(calls)==1
+
+        # 高度异常期间保留预留、继续处理绿色目标；恢复观测后核验，不能重复抓红块。
+        repair=[]
+        def uncertain_height(goal, attempt):
+            if goal.object_id=='red_1':
+                cell.move_object(goal)
+                repair.append(copy.deepcopy(cell.scene[0]))
+                cell.scene[0].pose.position.z -= .009
+                cell.issues=['class 1: uncertain height below nearby support surface']
+                return 'empty'
+            else:
+                cell.scene[0]=repair[0]
+                cell.issues=[]
+            return 'success'
+        calls,outcome=run_case(cell,'height_uncertain_then_recover',[red,green],uncertain_height,expected=True)
+        assert [g.object_id for g in calls]==['red_1','green_1'] and 'verified/completed=2' in outcome.message
+
+        calls,_=run_case(cell,'missing_released_waits',[red],hide_released,
+            cancel_when=lambda _:len(cell.calls)==1 and cell.frame_count>=35)
         assert len(calls)==1
         print('All adaptive planner logic probes passed (synthetic observations).', flush=True)
     finally:

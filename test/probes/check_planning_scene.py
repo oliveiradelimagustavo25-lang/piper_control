@@ -104,7 +104,11 @@ class SceneCheck(Node):
                 or abs(ground.pose.position.z + 0.01) > 1e-6):
             raise AssertionError('地面碰撞盒不存在或尺寸不正确')
         board = next((obj for obj in scene_objects if obj.id == 'environment/aruco_board'), None)
-        if (board is None or list(board.primitives[0].dimensions) != [0.2, 0.01, 0.2]
+        config = yaml.safe_load((ROOT/'src/my_robot_commander/config/manipulation.yaml').read_text())
+        board_enabled = 'aruco_board' in config['pick_place_executor']['ros__parameters']['scene_boxes']
+        if not board_enabled and board is not None:
+            raise AssertionError('已屏蔽的标记板仍存在于碰撞场景')
+        if board_enabled and (board is None or list(board.primitives[0].dimensions) != [0.2, 0.01, 0.2]
                 or abs(board.pose.position.x - 0.5) > 1e-6
                 or abs(board.pose.position.z - 0.1) > 1e-6
                 or abs(abs(board.pose.orientation.z) - math.sqrt(0.5)) > 1e-6):

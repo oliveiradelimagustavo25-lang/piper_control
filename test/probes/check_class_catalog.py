@@ -101,12 +101,13 @@ def main():
                         for u, bgr in [(40, (0, 0, 255)), (65, (0, 0, 255)),
                                        (95, (0, 255, 0)), (125, (255, 0, 0)), (145, (0, 255, 255))]:
                             image[56:65, u-4:u+5] = bgr
-                        depth_image = np.full((120, 160), 0.5, dtype=np.float32)
+                        depth_image = np.full((120, 160), 0.45, dtype=np.float32)
+                        depth_image[np.any(image != 0, axis=2)] = 0.5
                         if name == 'default':
-                            # 同一 5 cm 绿盒的较低侧面被颜色分割成独立连通区域，
-                            # 不能额外生成一个物体；两个同高度红盒仍须保留。
+                            # 侧面被分成独立区域且高度低于标称尺寸：报告定位不确定，
+                            # 不额外生成可抓物体；两个同高度红盒仍须保留。
                             image[58:63, 83:88] = (0, 255, 0)
-                            depth_image[58:63, 83:88] = 0.48
+                            depth_image[58:63, 83:88] = 0.46
                         until = time.monotonic() + 12
                         sent = set()
                         label_frame = None

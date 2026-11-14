@@ -218,8 +218,10 @@ def main():
                                 info.publish(camera)
                                 rgb.publish(Image(header=camera.header, width=96, height=48, encoding='bgr8',
                                     step=288, data=(np.zeros_like(image) if empty else image).tobytes()))
+                                distances = np.full((48, 96), .45, np.float32)
+                                distances[expected_labels != 0] = .5
                                 depth.publish(Image(header=camera.header, width=96, height=48, encoding='32FC1',
-                                    step=384, data=np.full((48, 96), .5, np.float32).tobytes()))
+                                    step=384, data=distances.tobytes()))
                                 rclpy.spin_once(node, timeout_sec=.04)
                                 if process.poll() is not None:
                                     raise AssertionError('Perception launch exited')

@@ -42,6 +42,8 @@ class TaskPlanner : public rclcpp::Node
   enum class RuleState {READY, RESERVED, PLACED, UNREACHABLE};
   struct RuleTarget {Class class_id; tf2::Vector3 goal, extent; RuleState state = RuleState::READY;};
   struct Attempt {int count = 0; rclcpp::Time retry_after{0, 0, RCL_ROS_TIME};};
+  struct Verification {Object source; tf2::Vector3 target; Slot slot;};
+  struct PlacementCheck {const Object * destination = nullptr; bool at_source = false, reliable = false;};
 
 public:
   TaskPlanner() : Node("task_planner"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
@@ -74,6 +76,7 @@ public:
     cooldown_ = declare_parameter<double>("retry_cooldown", 0.0);
     verify_timeout_ = declare_parameter<double>("verification_timeout", 3.0);
     slot_tolerance_ = declare_parameter<double>("slot_tolerance", 0.012);
+    height_tolerance_ = declare_parameter<double>("height_tolerance", 0.006);
     slot_clearance_ = declare_parameter<double>("slot_clearance", 0.025);
     max_age_ = declare_parameter<double>("max_observation_age", 2.0);
     timeout_ = declare_parameter<double>("observation_timeout", 5.0);
@@ -161,7 +164,7 @@ public:
       (verification_ != "visual" && verification_ != "motion") || max_attempts_ < 1 || max_objects_ < 0)
     {throw std::invalid_argument("Invalid task policy");}
     for (const double value : {max_age_, timeout_, action_timeout_, recovery_timeout_,
-      verify_timeout_, slot_tolerance_})
+      verify_timeout_, slot_tolerance_, height_tolerance_})
     {
       if (!std::isfinite(value) || value <= 0) {throw std::invalid_argument("Invalid timeout/tolerance");}
     }
@@ -192,6 +195,7 @@ public:
         strategy_ = handle->get_goal()->strategy.empty() ? default_strategy_ : handle->get_goal()->strategy;
         order_ = goalOrder(*handle->get_goal());
         attempts_.clear();
+        pending_verifications_.clear();
         skipped_.clear();
         unreachable_slots_.clear();
         rule_targets_.clear();
@@ -272,14 +276,36 @@ private:
     return goal;
   }
   bool near(const tf2::Vector3 & a, const tf2::Vector3 & b) const
-  {return (a - b).length() <= slot_tolerance_;}
-  void markPlaced(const std::string & observed_id)
+  {
+    return std::hypot(a.x() - b.x(), a.y() - b.y()) <= slot_tolerance_ &&
+           std::abs(a.z() - b.z()) <= height_tolerance_;
+  }
+  bool classIssue(Class id) const
+  {
+    const auto prefix = "class " + std::to_string(id) + ":";
+    return std::any_of(observations_->issues.begin(), observations_->issues.end(),
+      [&](const auto & issue) {return issue.rfind(prefix, 0) == 0;});
+  }
+  void markPlaced(const std::string & source_id, Slot slot, const std::string & observed_id)
   {
     if (use_position_rules_) {
-      auto target = rule_targets_.at(active_object_.object_id);
+      auto target = rule_targets_.at(source_id);
       target->state = RuleState::PLACED;
       if (!observed_id.empty()) {rule_targets_[observed_id] = target;}
-    } else {occupied_[active_slot_] = observed_id;}
+    } else {occupied_[slot] = observed_id;}
+  }
+  void confirmPlacement(const Object & source, Slot slot, const std::string & observed_id)
+  {
+    markPlaced(source.object_id, slot, observed_id);
+    attempts_.erase(source.object_id);
+    ++completed_;
+    feedback(source.object_id);
+    RCLCPP_INFO(get_logger(), "Placement verified: %s", source.object_id.c_str());
+  }
+  void releaseReservation(const std::string & id, Slot slot)
+  {
+    if (use_position_rules_) {rule_targets_.at(id)->state = RuleState::READY;}
+    else {occupied_.erase(slot);}
   }
   bool sorted(const Object & o) const
   {
@@ -292,7 +318,7 @@ private:
       });
     }
     return std::any_of(slots_.at(o.class_id).begin(), slots_.at(o.class_id).end(), [&](const auto & slot) {
-      return (position(o) - slot).length() <= slot_tolerance_;
+      return near(position(o), slot);
     });
   }
   std::vector<Object> objectsInBase()
@@ -520,47 +546,66 @@ private:
     for (auto it = occupied_.begin(); it != occupied_.end();) {
       const auto moved = std::find_if(objects.begin(), objects.end(), [&](const auto & o) {
         return !o.tracking_uncertain && o.object_id == it->second &&
-               (position(o) - slots_.at(it->first.first)[it->first.second]).length() > slot_tolerance_;
+               !near(position(o), slots_.at(it->first.first)[it->first.second]);
       });
       if (moved != objects.end()) {it = occupied_.erase(it);} else {++it;}
     }
     for (const auto & o : objects) {
       if (o.tracking_uncertain || !hasPlacement(o.class_id)) {continue;}
       for (size_t i = 0; i < slots_.at(o.class_id).size(); ++i) {
-        if ((position(o) - slots_.at(o.class_id)[i]).length() <= slot_tolerance_) {
+        if (near(position(o), slots_.at(o.class_id)[i])) {
           occupied_[{o.class_id, i}] = o.object_id;
           if (!verifying_ || o.object_id != active_object_.object_id) {attempts_.erase(o.object_id);}
         }
       }
     }
   }
+  PlacementCheck checkPlacement(const Object & source, const tf2::Vector3 & target,
+    const std::vector<Object> & objects) const
+  {
+    PlacementCheck result;
+    if (classIssue(source.class_id)) {return result;}
+    for (const auto & o : objects) {
+      if (o.class_id != source.class_id || o.tracking_uncertain) {continue;}
+      if (near(position(o), target)) {result.destination = &o;}
+      if (!sorted(o) && near(position(o), position(source))) {result.at_source = true;}
+      if (o.object_id == source.object_id &&
+        (std::abs(o.pose.position.z - target.z()) <= height_tolerance_ ||
+        std::abs(o.pose.position.z - source.pose.position.z) <= height_tolerance_))
+      {result.reliable = true;}
+    }
+    return result;
+  }
+  void verifyPending(const std::vector<Object> & objects)
+  {
+    for (auto it = pending_verifications_.begin(); it != pending_verifications_.end();) {
+      const auto & pending = it->second;
+      const auto check = checkPlacement(pending.source, pending.target, objects);
+      if (check.destination && !check.at_source) {
+        confirmPlacement(pending.source, pending.slot, check.destination->object_id);
+      } else if (!check.at_source && !check.reliable) {++it; continue;}
+      else if (check.at_source) {releaseReservation(it->first, pending.slot);}
+      it = pending_verifications_.erase(it);
+    }
+  }
   bool verify(const std::vector<Object> & objects)
   {
     if (!verifying_) {return false;}
-    const auto & slot = active_destination_;
-    const auto destination = std::find_if(objects.begin(), objects.end(), [&](const auto & o) {
-      return !o.tracking_uncertain && o.class_id == active_object_.class_id &&
-             (position(o) - slot).length() <= slot_tolerance_;
-    });
-    const bool at_source = std::any_of(objects.begin(), objects.end(), [&](const auto & o) {
-      return o.class_id == active_object_.class_id && !sorted(o) &&
-             (position(o) - position(active_object_)).length() <= slot_tolerance_;
-    });
-    if (destination != objects.end() && !at_source) {
-      markPlaced(destination->object_id);
-      attempts_.erase(active_object_.object_id);
-      ++completed_;
+    const auto check = checkPlacement(active_object_, active_destination_, objects);
+    if (check.destination && !check.at_source) {
+      confirmPlacement(active_object_, active_slot_, check.destination->object_id);
       verifying_ = false;
-      feedback(active_object_.object_id);
-      RCLCPP_INFO(get_logger(), "Placement verified: %s", active_object_.object_id.c_str());
     } else if ((now() - verification_since_).seconds() >= verify_timeout_) {
       verifying_ = false;
-      // 来源仍有物块、目标没有：很可能抓空，重新获取位置并有限重试。
-      if (at_source && destination == objects.end()) {
-        if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::READY;}
-        else {occupied_.erase(active_slot_);}
+      if (!check.at_source && !check.reliable) {
+        pending_verifications_[active_object_.object_id] = {active_object_, active_destination_, active_slot_};
+        restartObservation();
+        waiting("Placement observation uncertain; retaining reservation and observing again");
+        return true;
       }
-      failed(at_source ? "Object remains at source" : "Placement unconfirmed; reserved slot retained");
+      // 来源仍有物块、目标没有：很可能抓空，重新获取位置并有限重试。
+      if (check.at_source && !check.destination) {releaseReservation(active_object_.object_id, active_slot_);}
+      failed(check.at_source ? "Object remains at source" : "Placement unconfirmed; reserved slot retained");
     } else {return true;}
     return false;
   }
@@ -649,7 +694,7 @@ private:
         if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
         else {occupied_[active_slot_] = "";}
         if (verification_ == "motion") {
-          markPlaced("");
+          markPlaced(active_object_.object_id, active_slot_, "");
           attempts_.erase(active_object_.object_id);
           ++completed_; feedback(active_object_.object_id);
         } else {verifying_ = true;}
@@ -695,6 +740,7 @@ private:
       if (processed_sequence_ == sequence_) {return;}
       processed_sequence_ = sequence_;
       const auto objects = objectsInBase();
+      verifyPending(objects);
       updateOccupancy(objects);
       if (verification_since_.nanoseconds() == 0 && verifying_) {verification_since_ = now();}
       if (verify(objects) || !task_) {return;}
@@ -702,12 +748,14 @@ private:
         finish(attempts_.empty(), "Object limit reached"); return;
       }
       std::vector<Object> candidates;
-      bool deferred = false, no_slots = false;
+      bool deferred = !pending_verifications_.empty() || std::any_of(order_.begin(), order_.end(),
+        [&](Class id) {return classIssue(id);}), no_slots = false;
       for (const auto & o : objects) {
         if (!inWorkspace(o)) {continue;}
         if (!classes_.count(o.class_id)) {skip(o, "undefined class"); continue;}
         if (std::find(order_.begin(), order_.end(), o.class_id) == order_.end()) {continue;}
         if (!hasPlacement(o.class_id)) {skip(o, "no applicable placement rule"); continue;}
+        if (pending_verifications_.count(o.object_id) || classIssue(o.class_id)) {deferred = true; continue;}
         if (sorted(o)) {continue;}
         if (o.tracking_uncertain) {deferred = true; continue;}
         const auto attempt = attempts_.find(o.object_id);
@@ -743,6 +791,7 @@ private:
   rclcpp_action::Server<Sort>::SharedPtr server_;
   rclcpp::TimerBase::SharedPtr timer_;
   Objects::ConstSharedPtr observations_;
+  std::map<std::string, Verification> pending_verifications_;
   std::shared_ptr<SortHandle> task_;
   PickHandle::SharedPtr active_pick_;
   NamedHandle::SharedPtr active_named_;
@@ -768,7 +817,7 @@ private:
   rclcpp::Time idle_since_{0, 0, RCL_ROS_TIME}, verification_since_{0, 0, RCL_ROS_TIME};
   Clock::time_point action_since_, next_try_, recovery_since_;
   double max_age_, timeout_, action_timeout_, recovery_timeout_, settle_time_, idle_timeout_;
-  double cooldown_, verify_timeout_, slot_tolerance_, slot_clearance_;
+  double cooldown_, verify_timeout_, slot_tolerance_, height_tolerance_, slot_clearance_;
   int max_attempts_, max_objects_;
   int64_t recovery_request_id_ = 0;
   uint64_t sequence_ = 0, processed_sequence_ = 0;

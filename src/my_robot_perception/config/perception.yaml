@@ -46,6 +46,7 @@ depth_localizer:
     objects_frame: base_link     # Z 轴向上的坐标系，物体中心位姿使用此坐标系
     track_match_distance: 0.025  # m，同类物体跨帧匹配；不是物理身份保证
     track_ambiguity_margin: 0.003 # m，近似等距的对应关系标记为不确定
+    top_surface_tolerance: 0.003 # m，上部高度带宽及附近水平面的容差，不按形状筛选
     tf_timeout: 0.1              # s，等待采集时刻的 TF 到达，避免图像略早于关节 TF
     sync_slop: 0.03               # RGB 标签与深度时间差上限，单位 s
     sync_queue_size: 30          # 缓存等待推理结果；不放宽采集时间差

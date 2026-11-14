@@ -23,7 +23,8 @@ task_planner:
     on_slots_full: wait            # wait / finish；不强行重叠放置
     placement_verification: visual # visual / motion（motion 仅确认运动流程）
     verification_timeout: 3.0      # s，回观察位后等待抓后核验
-    slot_tolerance: 0.012          # m，物体中心相对本类别槽位的容差
+    slot_tolerance: 0.012          # m，水平距离容差
+    height_tolerance: 0.006        # m，独立高度容差；高度异常或漏检先重新观察，不盲目重抓
     slot_clearance: 0.010          # m，方块之外的额外净空；运动路径仍由 MoveIt 检查
     max_observation_age: 2.0
     observation_timeout: 5.0       # s，等待异常的告警间隔，默认保留任务等待恢复

@@ -48,8 +48,10 @@ public:
     target_frame_ = declare_parameter<std::string>("target_frame", "");
     objects_frame_ = declare_parameter<std::string>("objects_frame", "base_link");
     classes_ = my_robot_perception::loadCatalog(*this);
+    top_tolerance_ = declare_parameter<double>("top_surface_tolerance", 0.003);
     tf_timeout_ = declare_parameter<double>("tf_timeout", 0.1);
     if (objects_frame_.empty() ||
+      !std::isfinite(top_tolerance_) || top_tolerance_ <= 0 ||
       !std::isfinite(tf_timeout_) || tf_timeout_ < 0)
     {
       throw std::invalid_argument("Invalid object frame or TF timeout");
@@ -231,6 +233,24 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
           "Object center TF unavailable: %s", error.what());
       }
+      const cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) <<
+        fx, 0, info_->k[2], 0, fy, info_->k[5], 0, 0, 1);
+      const auto depthAt = [&](const cv::Point & pixel) {
+        return depth_msg->encoding == "32FC1" ? depth->image.at<float>(pixel) :
+               depth->image.at<uint16_t>(pixel) * 0.001f;
+      };
+      const auto worldPoints = [&](const std::vector<cv::Point2d> & pixels,
+        const std::vector<float> & distances) {
+        std::vector<cv::Point2d> rays;
+        cv::undistortPoints(pixels, rays, camera_matrix,
+          distorted ? cv::Mat(info_->d) : cv::Mat());
+        std::vector<tf2::Vector3> result;
+        for (size_t i = 0; i < rays.size(); ++i) {
+          result.push_back(camera_to_objects * tf2::Vector3(
+            rays[i].x * distances[i], rays[i].y * distances[i], distances[i]));
+        }
+        return result;
+      };
       for (const auto & definition : classes_) {
         if (!present.count(definition.id)) {continue;}
         const auto class_name = "class " + std::to_string(definition.id);
@@ -250,8 +270,7 @@ private:
           std::vector<float> depths;
           std::vector<cv::Point> valid_pixels;
           for (const auto & pixel : pixels) {
-            const float z = depth_msg->encoding == "32FC1" ?
-              depth->image.at<float>(pixel) : depth->image.at<uint16_t>(pixel) * 0.001f;
+            const float z = depthAt(pixel);
             if (std::isfinite(z) && z >= min_depth_ && z <= max_depth_) {
               depths.push_back(z);
               valid_pixels.push_back(pixel);
@@ -263,10 +282,12 @@ private:
           }
           const float center_depth = median(depths);
           std::vector<float> inliers;
+          std::vector<cv::Point2d> inlier_pixels;
           cv::Point2d uv(0, 0);
           for (size_t i = 0; i < depths.size(); ++i) {
             if (std::abs(depths[i] - center_depth) <= depth_tolerance_) {
               inliers.push_back(depths[i]);
+              inlier_pixels.emplace_back(valid_pixels[i].x, valid_pixels[i].y);
               uv += cv::Point2d(valid_pixels[i].x, valid_pixels[i].y);
             }
           }
@@ -276,28 +297,72 @@ private:
           }
           uv *= 1.0 / inliers.size();
           std::vector<cv::Point2d> ray;
-          const cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) <<
-            fx, 0, info_->k[2], 0, fy, info_->k[5], 0, 0, 1);
           cv::undistortPoints(std::vector<cv::Point2d>{uv}, ray, camera_matrix,
             distorted ? cv::Mat(info_->d) : cv::Mat());
           const float z = median(inliers);
           points.emplace_back(ray[0].x * z, ray[0].y * z, z);
           class_ids.push_back(static_cast<uint8_t>(definition.id));
 
-          // 统一掩码定位：有效像素中心 + 深度中值。标称半高将表面点换为近似中心。
-          // 假设物体直立、顶部可见；遮挡和侧面占比高时中心可能偏移。
+          // 在 Z 向上的坐标系选上部高度，避免把侧面深度中值当成顶部。
           if (objects_tf_ready) {
-            const auto center = camera_to_objects * tf2::Vector3(
-              points.back().x, points.back().y, points.back().z);
+            const auto surface = worldPoints(inlier_pixels, inliers);
+            std::vector<float> heights;
+            for (const auto & point : surface) {heights.push_back(point.z());}
+            const auto upper = heights.begin() + heights.size() * 9 / 10;
+            std::nth_element(heights.begin(), upper, heights.end());
+            const double top = *upper;
+            tf2::Vector3 lower(1e9, 1e9, 0), higher(-1e9, -1e9, 0);
+            std::vector<float> top_heights;
+            for (const auto & point : surface) {
+              if (std::abs(point.z() - top) > top_tolerance_) {continue;}
+              lower.setX(std::min(lower.x(), point.x()));
+              lower.setY(std::min(lower.y(), point.y()));
+              higher.setX(std::max(higher.x(), point.x()));
+              higher.setY(std::max(higher.y(), point.y()));
+              top_heights.push_back(point.z());
+            }
+            const double center_z = median(top_heights) - definition.dimensions[2] / 2;
+            // 在目标附近稀疏采样背景；仅在多数点落于同一水平面时检查穿入支撑面。
+            const auto bounds = cv::boundingRect(pixels);
+            const int pad = std::max(4, std::max(bounds.width, bounds.height) / 3);
+            std::vector<cv::Point2d> background;
+            std::vector<float> background_depth;
+            for (int y = std::max(0, bounds.y - pad);
+              y < std::min(mask.rows, bounds.y + bounds.height + pad); y += std::max(2, pad / 2))
+            {
+              for (int x = std::max(0, bounds.x - pad);
+                x < std::min(mask.cols, bounds.x + bounds.width + pad); x += std::max(2, pad / 2))
+              {
+                const float d = depthAt({x, y});
+                if (!labels->image.at<uint8_t>(y, x) && std::isfinite(d) && d >= min_depth_ && d <= max_depth_) {
+                  background.emplace_back(x, y);
+                  background_depth.push_back(d);
+                }
+              }
+            }
+            if (background.size() >= static_cast<size_t>(min_pixels_)) {
+              std::vector<float> floor;
+              for (const auto & point : worldPoints(background, background_depth)) {floor.push_back(point.z());}
+              const double support = median(floor);
+              const auto planar = std::count_if(floor.begin(), floor.end(), [&](float z) {
+                return std::abs(z - support) <= top_tolerance_;
+              });
+              if (planar * 2 > static_cast<int>(floor.size()) &&
+                center_z - definition.dimensions[2] / 2 < support - top_tolerance_)
+              {
+                issue(class_name + ": uncertain height below nearby support surface");
+                continue;
+              }
+            }
             my_robot_interface::msg::DetectedObject object;
             object.class_id = definition.id;
             object.color = definition.color;
             object.dimensions.x = definition.dimensions[0];
             object.dimensions.y = definition.dimensions[1];
             object.dimensions.z = definition.dimensions[2];
-            object.pose.position.x = center.x();
-            object.pose.position.y = center.y();
-            object.pose.position.z = center.z() - object.dimensions.z / 2;
+            object.pose.position.x = (lower.x() + higher.x()) / 2;
+            object.pose.position.y = (lower.y() + higher.y()) / 2;
+            object.pose.position.z = center_z;
             object.pose.orientation.w = 1.0;
             objects.objects.push_back(object);
           }
@@ -368,7 +433,7 @@ private:
   std::vector<my_robot_perception::ObjectClass> classes_;
   double match_distance_, ambiguity_margin_;
   std::string target_frame_, objects_frame_;
-  double min_depth_, max_depth_, depth_tolerance_, tf_timeout_;
+  double min_depth_, max_depth_, depth_tolerance_, top_tolerance_, tf_timeout_;
   int min_pixels_, erosion_size_;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr info_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;
