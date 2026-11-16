@@ -89,8 +89,17 @@ class FakeCell(Node):
         result.success = outcome in ('success', 'success_new_id', 'empty')
         result.released = result.success
         result.holding = outcome == 'holding'
-        result.ready_for_next_pick = not result.holding
-        result.unreachable_placement = outcome == 'unreachable'
+        # 真实执行器在预检前提错误时尚未张爪，ready_for_next_pick 为假。
+        result.ready_for_next_pick = not result.holding and outcome != 'precondition'
+        result.unreachable_placement = outcome in (
+            'unreachable', 'pre_grasp_ik', 'place_ik', 'release_space')
+        result.precheck_failure = {
+            'unreachable': PickPlace.Result.PRECHECK_PRE_GRASP_IK,
+            'pre_grasp_ik': PickPlace.Result.PRECHECK_PRE_GRASP_IK,
+            'place_ik': PickPlace.Result.PRECHECK_PLACE_IK,
+            'release_space': PickPlace.Result.PRECHECK_RELEASE_SPACE,
+            'precondition': PickPlace.Result.PRECHECK_PRECONDITION,
+        }.get(outcome, PickPlace.Result.PRECHECK_NONE)
         result.message = outcome
         if result.success:
             handle.succeed()
@@ -221,6 +230,103 @@ def main():
         calls, _ = run_case(cell, 'unreachable_slot', [red],
                             lambda g,n: 'unreachable' if g.place_pose.pose.position.x == 0.26 else 'success', expected=True)
         assert len(calls)==2 and calls[1].place_pose.pose.position.x==0.34
+        # 松爪空间受阻同样切换候选。
+        calls, _ = run_case(cell, 'release_space_slot', [red],
+                            lambda g,n: 'release_space' if g.place_pose.pose.position.x == 0.26 else 'success', expected=True)
+        assert len(calls)==2 and calls[1].place_pose.pose.position.x==0.34
+        # 唯一候选被预检拒绝：按候选上限重试后停止，报告原因而不是“区域已满”。
+        calls, outcome = run_case(cell, 'candidate_retry_limit', [red], lambda g,n: 'pre_grasp_ik',
+                                  overrides={'classes.1.place_slots': [0.26, -0.06, 0.005],
+                                             'on_slots_full': 'finish'}, expected=False)
+        assert len(calls)==2, len(calls)
+        assert 'rejected by precheck' in outcome.message, outcome.message
+        assert 'Placement area full' not in outcome.message
+        assert '[candidate pre_grasp_ik:2]' in outcome.message, outcome.message
+
+        # 环境变化后重评被拒候选。
+        def moved_after_reject(goal, attempt):
+            if attempt == 1:
+                cell.scene[0].pose.position.x -= 0.03
+                return 'place_ik'
+            return 'success'
+        calls, _ = run_case(cell, 'candidate_scene_reeval', [red], moved_after_reject,
+                            overrides={'classes.1.place_slots': [0.26, -0.06, 0.005]}, expected=True)
+        assert len(calls)==2, len(calls)
+
+        # 前提错误不消耗抓取次数、不调用恢复服务；条件恢复后完成。
+        calls, _ = run_case(cell, 'precondition_retry', [red],
+                            lambda g,n: 'precondition' if n==1 else 'success', expected=True)
+        assert len(calls)==2 and cell.recoveries==0
+        calls, outcome = run_case(cell, 'precondition_exhausted', [red], lambda g,n: 'precondition',
+                                  expected=False)
+        assert len(calls)==3, len(calls)
+        assert 'skipped_targets=1' in outcome.message and 'precondition' in outcome.message
+
+        # 单点规则被拒：报告“无备选目标”，不得冒充“区域已满”。
+        single={'place_position_modes':['absolute']*3, 'place_positions.1':[0.26,-0.06,0.005],
+                'on_slots_full':'finish'}
+        calls, outcome = run_case(cell, 'single_point_rejected', [red], lambda g,n: 'place_ik',
+                                  overrides=single, expected=False)
+        assert 'no alternative target' in outcome.message, outcome.message
+        assert 'Placement area full' not in outcome.message
+
+        # 绝对区域：同类多物体按半径升序填格。
+        region={'place_position_modes':['absolute']*3,
+                'place_regions.1':[0.26,-0.06,0.34,-0.06,0.005]}
+        calls,_=run_case(cell,'rules_region_multi',
+                         [obj('red_1',1,0.30,-0.14),obj('red_2',1,0.32,-0.10),obj('red_3',1,0.34,-0.02)],
+                         overrides=region,expected=True)
+        xs=[round(g.place_pose.pose.position.x,6) for g in calls]
+        assert xs==[0.26,0.30,0.34], xs
+        assert all(abs(g.place_pose.pose.position.y+0.06)<1e-9 for g in calls)
+        # 被预检拒绝的候选达上限后换下一个；单候选上限调成 1 时两次调用完成。
+        calls,_=run_case(cell,'rules_region_skip_rejected',[obj('red_1',1,0.32,-0.12)],
+                         lambda g,n:'place_ik' if abs(g.place_pose.pose.position.x-0.26)<1e-6 else 'success',
+                         overrides={**region,'max_candidate_attempts':1},expected=True)
+        assert [round(g.place_pose.pose.position.x,6) for g in calls]==[0.26,0.30], calls
+        # 全部候选被拒：按候选上限结束，原因不是“区域已满”。
+        calls,outcome=run_case(cell,'rules_region_exhausted',[obj('red_1',1,0.32,-0.12)],lambda g,n:'place_ik',
+                               overrides={**region,'max_candidate_attempts':1,'on_slots_full':'finish'},expected=False)
+        assert len(calls)==3, len(calls)
+        assert 'rejected by precheck' in outcome.message and 'Placement area full' not in outcome.message
+        # 已在候选位的物体占位，后续物体换下一格。
+        calls,_=run_case(cell,'rules_region_occupied',
+                         [obj('already_sorted',1,0.26,-0.06),obj('red_1',1,0.32,-0.12)],
+                         overrides=region,expected=True)
+        assert len(calls)==1 and round(calls[0].place_pose.pose.position.x,6)==0.30, calls
+        # 区域类与点类混合：点类仍按物体冻结目标，保留尺寸预留检查。
+        mixed={**region,'place_positions.2':[0.30,0.06,0.005]}
+        calls,_=run_case(cell,'rules_region_mixed',[green,red],overrides=mixed,expected=True)
+        targets={(round(g.place_pose.pose.position.x,6),round(g.place_pose.pose.position.y,6)) for g in calls}
+        assert targets=={(0.26,-0.06),(0.30,0.06)}, targets
+        # 场景持续变化也只为每个候选复活有限次，避免冻结目标的无限重试。
+        def reject_and_move(goal,attempt):
+            cell.scene[0].pose.position.x+=0.02
+            return 'pre_grasp_ik'
+        calls,_=run_case(cell,'rules_region_reeval_cap',[obj('red_1',1,0.32,-0.12)],reject_and_move,
+                         overrides={**region,'max_candidate_attempts':1,'max_candidate_reevaluations':1,
+                                    'on_slots_full':'finish'},expected=False)
+        assert len(calls)==6, len(calls)
+        # 区域放置后暂时漏检：点类目标仍不得与预留位置重叠。
+        mixed_hidden={'place_position_modes':['absolute']*3,
+                      'place_regions.1':[0.30,-0.06,0.34,-0.06,0.005],
+                      'place_positions.2':[0.30,-0.06,0.005],
+                      'placement_verification':'motion','on_slots_full':'finish'}
+        def hide_placed(goal,attempt):
+            cell.scene=[o for o in cell.scene if o.object_id!=goal.object_id]
+            return 'success'
+        calls,outcome=run_case(cell,'rules_mixed_hidden_point',[red,green],hide_placed,
+                               overrides=mixed_hidden,expected=False)
+        assert len(calls)==1, len(calls)
+        # 反向：点规则放置后漏检，区域候选要避开它的预留位置。
+        calls,_=run_case(cell,'rules_mixed_hidden_region',[red,green],hide_placed,
+                         overrides=mixed_hidden,colors=[2,1],expected=True)
+        assert [round(g.place_pose.pose.position.x,6) for g in calls]==[0.30,0.34], calls
+        # 短区域数组在索引前被拒绝：Planner 继续运行并跳过该类别。
+        calls,outcome=run_case(cell,'rules_region_short_array',[red],
+                               overrides={'place_position_modes':['absolute']*3,
+                                          'place_regions.1':[0.30,-0.06]},expected=False)
+        assert not calls and 'no applicable placement rule' in outcome.message, outcome.message
         calls, _ = run_case(cell, 'empty_grasp', [red], lambda g, n: 'empty' if n == 1 else 'success', expected=True)
         assert len(calls) == 2
 

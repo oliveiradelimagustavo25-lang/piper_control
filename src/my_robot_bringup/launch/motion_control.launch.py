@@ -21,15 +21,16 @@ EXECUTION_ARGUMENTS = {
     'acceleration_scaling': (float, 'Motion acceleration scaling'),
     'planning_time': (float, 'Planning timeout in seconds'),
     'cartesian_step': (float, 'Cartesian interpolation step in metres'),
+    'ik_timeout': (float, 'IK solver timeout in seconds'),
 }
 
 
-def resolve_placement(planner, modes='', positions=''):
+def resolve_placement(planner, modes='', positions='', regions=''):
     path = Path(get_package_share_directory('my_robot_bringup')) / 'build/placement_config.py'
     spec = importlib.util.spec_from_file_location('piper_placement_config', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.resolve(planner, modes, positions)
+    return module.resolve(planner, modes, positions, regions)
 
 
 def launch_setup(context):
@@ -54,7 +55,8 @@ def launch_setup(context):
     execution = dict(execution)
     # launch_ros cannot serialize empty arrays. Omitted optional arrays use the
     # planner's typed defaults (unrestricted workspace / legacy single slot).
-    planner = resolve_placement(planner, argument('place_position_modes'), argument('place_positions'))
+    planner = resolve_placement(planner, argument('place_position_modes'),
+                                argument('place_positions'), argument('place_regions'))
     planner = {name: value for name, value in planner.items() if value != []}
     for name, (value_type, _) in EXECUTION_ARGUMENTS.items():
         if argument(name):
@@ -116,6 +118,7 @@ def generate_launch_description():
         'observation_target': 'Observation named pose',
         'place_position_modes': 'X/Y/Z relative or absolute modes',
         'place_positions': 'Class center coordinates or offsets',
+        'place_regions': 'Absolute class regions [xmin,ymin,xmax,ymax,z]',
     }.items():
         arguments.append(DeclareLaunchArgument(name, default_value='', description=description + '; empty uses YAML'))
     arguments.extend(DeclareLaunchArgument(name, default_value='', description=description + '; empty uses YAML')

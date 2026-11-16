@@ -31,6 +31,7 @@ EXECUTION_ARGUMENTS = {
     'acceleration_scaling': (float, 'Motion acceleration scaling'),
     'planning_time': (float, 'Motion planning timeout in seconds'),
     'cartesian_step': (float, 'Cartesian interpolation step in metres'),
+    'ik_timeout': (float, 'IK solver timeout in seconds'),
 }
 
 
@@ -59,7 +60,8 @@ CONFIG_PATHS = {
 }
 CONFIG_KEYS = set(EXECUTION_ARGUMENTS) | set(PERCEPTION_ARGUMENTS) | CONFIG_PATHS | {
     'headless', 'with_moveit', 'with_rviz', 'with_executor', 'with_motion', 'with_perception', 'with_camera',
-    'sim_speed_factor', 'planning_pipeline', 'pick_place_action', 'sort_action', 'observation_target', 'scenes', 'place_position_modes', 'place_positions', 'dry_run',
+    'sim_speed_factor', 'planning_pipeline', 'pick_place_action', 'sort_action', 'observation_target', 'scenes',
+    'place_position_modes', 'place_positions', 'place_regions', 'dry_run',
 }
 
 
@@ -96,7 +98,7 @@ def load_launch_config(path):
         raise ValueError(f'Unknown launch_config arguments: {sorted(unknown)}')
     # Placement values are validated after CLI/YAML precedence is resolved.
     for name, value in data.items():
-        if name in ('place_position_modes', 'place_positions'):
+        if name in ('place_position_modes', 'place_positions', 'place_regions'):
             continue
         if name == 'scenes':
             if value is not None and not isinstance(value, dict):
@@ -126,7 +128,7 @@ class ConfigDefault(Substitution):
             config = load_launch_config(str(path))
             value = config.get(self.name)
             if value is not None:
-                if self.name in ('place_position_modes', 'place_positions'):
+                if self.name in ('place_position_modes', 'place_positions', 'place_regions'):
                     return yaml.safe_dump(value, default_flow_style=True, width=100000).strip()
                 if isinstance(value, bool):
                     return str(value).lower()
@@ -143,6 +145,17 @@ class ConfigDefault(Substitution):
 
 def config_argument(name, default_value, **options):
     return DeclareLaunchArgument(name, default_value=ConfigDefault(name, default_value), **options)
+
+
+def placement_defaults(context, config):
+    """Resolve point/region rules together, before their source information is lost."""
+    names = ('place_positions', 'place_regions')
+    if any(LaunchConfiguration(name).perform(context) for name in names):
+        return  # Explicit launch rules replace the entire YAML rule set.
+    for name in names:
+        if config.get(name) is not None:
+            context.launch_configurations[name] = yaml.safe_dump(
+                config[name], default_flow_style=True, width=100000).strip()
 
 
 def include_layer(bringup, filename, arguments):
@@ -176,7 +189,7 @@ def control_layer(bringup, argument, topics):
 def motion_layer(bringup, argument, objects_topic):
     names = ('planning_pipeline', 'moveit_controllers_file', 'manipulation_config',
              'planner_config', 'perception_config', 'class_config', 'pick_place_action', 'sort_action', 'observation_target',
-             'place_position_modes', 'place_positions',
+             'place_position_modes', 'place_positions', 'place_regions',
              *EXECUTION_ARGUMENTS)
     arguments = {name: argument(name) for name in names}
     arguments.update(robot_description=LaunchConfiguration('_piper_control_description'), objects_topic=objects_topic)
@@ -204,8 +217,8 @@ def launch_setup(context):
         return LaunchConfiguration(name).perform(context)
 
     config_file = argument('launch_config')
-    if config_file:
-        load_launch_config(str(Path(config_file).expanduser().resolve()))
+    config = load_launch_config(str(Path(config_file).expanduser().resolve())) if config_file else {}
+    placement_defaults(context, config)
 
     with_moveit = IfCondition(LaunchConfiguration('with_moveit')).evaluate(context)
     with_rviz = IfCondition(LaunchConfiguration('with_rviz')).evaluate(context)
@@ -250,7 +263,8 @@ def launch_setup(context):
             on_shutdown=lambda event, context: shutil.rmtree(runtime, ignore_errors=True))))
     if IfCondition(LaunchConfiguration('dry_run')).evaluate(context):
         planner = yaml.safe_load(Path(argument('planner_config')).read_text())['task_planner']['ros__parameters']
-        planner = placement_config().resolve(planner, argument('place_position_modes'), argument('place_positions'))
+        planner = placement_config().resolve(planner, argument('place_position_modes'),
+                                             argument('place_positions'), argument('place_regions'))
         execution = yaml.safe_load(Path(argument('manipulation_config')).read_text())['pick_place_executor']['ros__parameters']
         frame = argument('reference_frame') or execution.get('reference_frame', 'base_link')
         return layers + [LogInfo(msg=f'Detector: {detector}; common depth localization')] + [LogInfo(msg=line) for line in placement_config().describe(
@@ -277,7 +291,8 @@ def generate_launch_description():
                               description='Optional external YAML with launch argument defaults'),
         config_argument('dry_run', default_value='false', choices=['true', 'false'], description='Validate and describe placement without starting nodes'),
         config_argument('place_position_modes', default_value='', description='X/Y/Z relative or absolute modes; empty uses planner YAML'),
-        config_argument('place_positions', default_value='', description='Mapping of class IDs to center coordinates or offsets'),
+        DeclareLaunchArgument('place_positions', default_value='', description='Mapping of class IDs to center coordinates or offsets'),
+        DeclareLaunchArgument('place_regions', default_value='', description='Mapping of class IDs to absolute [xmin,ymin,xmax,ymax,z] regions'),
         config_argument('headless', default_value='false', choices=['true', 'false'],
                               description='Run without the MuJoCo window'),
         config_argument('with_moveit', default_value='true', choices=['true', 'false'],

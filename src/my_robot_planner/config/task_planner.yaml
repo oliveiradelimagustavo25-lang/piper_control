@@ -18,6 +18,8 @@ task_planner:
     max_objects: 0                 # 0 不限；按已核验搬运次数计数
     retry_policy: priority         # priority / immediate / disabled
     max_attempts: 3                # 包含首次；不会因漏检而清零
+    max_candidate_attempts: 2      # 单个放置候选被预检拒绝后的重试上限；环境变化可重评
+    max_candidate_reevaluations: 1 # 场景变化后单个候选最多复活次数；0 不重评，避免冻结目标活锁
     retry_cooldown: 0.0            # s，默认重新观察后即可参与优先级选择
     on_attempts_exhausted: continue # continue: 其他物体继续；stop: 结束任务
     on_slots_full: wait            # wait / finish；不强行重叠放置
@@ -38,6 +40,9 @@ task_planner:
     # 以原点为中心、按间距在各类别区域内自动生成放置候选，不配置每类物体数量。
     # region: [xmin, ymin, xmax, ymax, 物体中心z]，m；可移动/扩大区域以适配工作台。
     # 规则入口位于总配置。独立启动时可在此配置 place_positions.<class_id>。
+    # place_regions.<class_id> 为绝对区域 [xmin,ymin,xmax,ymax,z]：区域内按 placement_step
+    # 生成候选，同类多物体依次填格；与 place_positions 同类互斥，且不受 X/Y/Z 模式影响。
+    # place_regions.1: [0.25, -0.14, 0.39, -0.10, 0.015]
     # 未显式提供 place_positions 时使用下面区域；相对模式不能套用旧区域原点。
     place_position_modes: [absolute, absolute, absolute]
     placement_step: [0.04, 0.06]

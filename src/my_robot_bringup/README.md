@@ -145,7 +145,7 @@ ros2 launch my_robot_moveit_pkg moveit_rviz.launch.py use_sim_time:=true
 
 ## 放置规则参数
 
-`place_position_modes` 与 `place_positions` 可在总配置设置，或作为同名 launch 参数覆盖。启动层校验并传给 planner；不传给执行器做二次偏移。优先级为显式 launch 参数 > 总配置 > planner YAML > 节点默认。配置了显式规则时覆盖旧区域/槽位策略；所有层均未提供规则才使用显式类别区域/槽位；缺少规则的类别不抓取。`dry_run:=true` 仅打印有效规则、不启动节点；脚本提供 `--dry-run`。见 [放置规则说明](../../script/README.md#放置坐标规则与优先级)。
+`place_position_modes`、`place_positions` 与 `place_regions` 可在总配置设置，或作为同名 launch 参数覆盖。`place_regions.<id>` 为绝对区域 `[xmin,ymin,xmax,ymax,z]`，区域内按 planner 的 `placement_step` 生成候选，适合同类多物体；区域恒为绝对，与同类 `place_positions` 同时配置会启动失败。启动层校验并传给 planner；不传给执行器做二次偏移。优先级为显式 launch 参数 > 总配置 > planner YAML > 节点默认。`place_positions` 与 `place_regions` 属同一规则集：更高层提供任一者即整体替换低层两类规则；同一层内同一类别同时配置会启动失败（可用空映射显式清空）。配置了显式规则时覆盖旧区域/槽位策略；所有层均未提供规则才使用显式类别区域/槽位；缺少规则的类别不抓取。`dry_run:=true` 仅打印有效规则、不启动节点；脚本提供 `--dry-run`。见 [放置规则说明](../../script/README.md#放置坐标规则与优先级)。
 
 抓取执行器与感知、Planner 读取同一类别表。PickPlace Goal 的 `class_id` 用于选择碰撞几何；0 表示手动目标，使用传入尺寸的盒体。box/cylinder/sphere 按表建模，其他类型用包围盒。固定向下抓取策略在 commander/config/manipulation.yaml 配置：默认张开 0.07 m，标称夹持 0.03 m，扣除 0.002 m 压缩量后闭合到 0.028 m。新类别仍需在总配置的 scenes 和 place_positions 中填写场景及放置规则。接口新增 class_id 后，相关节点需一起重新编译并重启。
 

@@ -253,7 +253,15 @@ void PickPlaceScene::attach()
 void PickPlaceScene::release()
 {
   const auto attached = scene_.getAttachedObjects({held_id_});
-  auto object = attached.at(held_id_).object;
+  const auto found = attached.find(held_id_);
+  if (found == attached.end()) {
+    // 附着已被外部移除；同步本地记录，否则执行器会永久停在“带载”状态。
+    RCLCPP_WARN(node_->get_logger(),
+      "MoveIt attachment %s is already gone; cleared the local held record", held_id_.c_str());
+    held_id_.clear();
+    return;
+  }
+  auto object = found->second.object;
   geometry_msgs::msg::PoseStamped pose;
   pose.header = object.header;
   pose.header.stamp = builtin_interfaces::msg::Time();
@@ -263,7 +271,7 @@ void PickPlaceScene::release()
   object.pose = pose.pose;
   object.operation = object.ADD;
   auto update = diff();
-  auto remove = attached.at(held_id_);
+  auto remove = found->second;
   remove.object.operation = remove.object.REMOVE;
   update.robot_state.attached_collision_objects.push_back(remove);
   update.world.collision_objects.push_back(object);

@@ -15,7 +15,7 @@ import yaml
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Pose
-from moveit_msgs.msg import CollisionObject, PlanningSceneComponents
+from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningSceneComponents
 from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene, GetStateValidity
 from my_robot_interface.action import MoveToNamed, PickPlace
 from my_robot_interface.msg import DetectedObject, DetectedObjectArray
@@ -63,6 +63,13 @@ class SceneCheck(Node):
         request.components.components = (PlanningSceneComponents.WORLD_OBJECT_GEOMETRY |
                                           PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS)
         return self.call(self.get_scene, request).scene
+
+    def arm_joints(self):
+        request = GetPlanningScene.Request()
+        request.components.components = PlanningSceneComponents.ROBOT_STATE
+        joint_state = self.call(self.get_scene, request).scene.robot_state.joint_state
+        return {name: value for name, value in zip(joint_state.name, joint_state.position)
+                if name in ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')}
 
     def publish_object(self, object_id, x, y, z):
         message = DetectedObjectArray()
@@ -180,7 +187,33 @@ class SceneCheck(Node):
             raise AssertionError('移除障碍后机器人状态仍然碰撞')
         print('通过：障碍加入后碰撞、移除后恢复', flush=True)
 
-    def check_attachment(self, cancel=False):
+    def arm_delta(self, before, after):
+        """手臂关节变化超过 1e-3 rad 的项；夹爪关节不在统计范围。"""
+        return {name: after[name] - before[name] for name in before
+                if abs(after[name] - before[name]) > 1e-3}
+
+    def recover(self, expect_message=None):
+        """调用负载恢复服务，返回 (是否移动手臂, 响应消息)。"""
+        self.wait(self.release.service_is_ready, 10, '负载恢复服务')
+        before = self.arm_joints()
+        response = self.call(self.release, Trigger.Request(), timeout=90)
+        moved = bool(self.arm_delta(before, self.arm_joints()))
+        if expect_message and expect_message not in response.message:
+            raise AssertionError(f'恢复服务消息缺少 {expect_message!r}：{response.message}')
+        return moved, response
+
+    def detach(self, object_id):
+        """从 MoveIt 侧外部解除附着，制造夹爪状态与场景状态不一致。"""
+        request = ApplyPlanningScene.Request()
+        request.scene.is_diff = request.scene.robot_state.is_diff = True
+        detached = AttachedCollisionObject()
+        detached.object.id, detached.object.operation = object_id, CollisionObject.REMOVE
+        request.scene.robot_state.attached_collision_objects = [detached]
+        self.wait(self.apply_scene.service_is_ready, 15, '场景写入服务')
+        if not self.call(self.apply_scene, request).success:
+            raise RuntimeError('外部解除附着失败')
+
+    def check_attachment(self, mode):
         obj = self.publish_object('red_cube', 0.32, -0.08, self.dimensions[2] / 2)
         goal = PickPlace.Goal()
         goal.object_id = obj.object_id
@@ -200,31 +233,55 @@ class SceneCheck(Node):
         result = handle.get_result_async()
         attached_seen = False
         cancel_sent = False
+        detached = False
         deadline = time.monotonic() + 90
         while not result.done() and time.monotonic() < deadline:
             scene = self.scene()
             attached_seen |= any(item.object.id == obj.object_id and
                                  {'link7', 'link8'}.issubset(item.touch_links)
                                  for item in scene.robot_state.attached_collision_objects)
-            if cancel and attached_seen and not cancel_sent:
+            if mode == 'cancel' and attached_seen and not cancel_sent:
                 request = handle.cancel_goal_async()
                 self.wait(request.done, 10, '取消抓放')
                 if not request.result().goals_canceling:
                     raise RuntimeError('取消请求未被接受')
                 cancel_sent = True
+            if mode == 'desync' and attached_seen and not detached:
+                # 夹爪仍夹着物块时抽掉 MoveIt 附着，逼近松爪与场景解除不同步的窗口。
+                self.detach(obj.object_id)
+                detached = True
             rclpy.spin_once(self, timeout_sec=0.1)
         if not result.done():
             raise RuntimeError('抓放动作超时')
         outcome = result.result()
-        expected = GoalStatus.STATUS_CANCELED if cancel else GoalStatus.STATUS_SUCCEEDED
-        if outcome is None or outcome.status != expected or (not cancel and not outcome.result.success):
-            raise RuntimeError(f'抓放动作失败：{outcome}')
-        if cancel:
+        if outcome is None:
+            raise RuntimeError('抓放动作没有返回结果')
+        if mode == 'cancel':
+            if outcome.status != GoalStatus.STATUS_CANCELED:
+                raise RuntimeError(f'取消后的动作状态不正确：{outcome.status}')
             assert outcome.result.holding and not outcome.result.released, outcome.result
-        else:
-            assert outcome.result.released and not outcome.result.holding and outcome.result.ready_for_next_pick, outcome.result
+        elif mode != 'desync':
+            if outcome.status != GoalStatus.STATUS_SUCCEEDED or not outcome.result.success:
+                raise RuntimeError(f'抓放动作失败：{outcome}')
+            assert (outcome.result.released and not outcome.result.holding
+                    and outcome.result.ready_for_next_pick), outcome.result
+        if mode == 'desync':
+            # 附着被外部抽走时 release() 应幂等自愈：动作照常完成，不把执行器锁死在“带载”。
+            if outcome.status != GoalStatus.STATUS_SUCCEEDED or not outcome.result.released \
+                    or outcome.result.holding:
+                raise AssertionError(
+                    f'附着失步后没有自愈：status={outcome.status} {outcome.result}')
+            in_world = any(item.id == obj.object_id for item in self.scene().world.collision_objects)
+            print(f'自愈后的场景记录：world 中{"仍" if in_world else "已"}有该物块，'
+                  f'ready_for_next_pick={outcome.result.ready_for_next_pick}', flush=True)
+            moved, response = self.recover()
+            if moved or not response.success:
+                raise AssertionError(
+                    f'失步自愈后不应留下可用恢复目标：moved={moved} {response.message}')
+            print('通过：外部抽走附着时幂等自愈，执行器未被锁死', flush=True)
+            return
         scene = self.scene()
-        if cancel:
+        if mode == 'cancel':
             if not attached_seen or not any(item.object.id == obj.object_id
                                             for item in scene.robot_state.attached_collision_objects):
                 raise AssertionError('取消后没有保留规划场景中的附着物')
@@ -232,10 +289,11 @@ class SceneCheck(Node):
             self.wait(blocked.done, 10, '带载时的抓放请求')
             if blocked.result() is None or blocked.result().accepted:
                 raise AssertionError('保留负载时不应接收新的抓放请求')
-            self.wait(self.release.service_is_ready, 10, '负载恢复服务')
-            response = self.call(self.release, Trigger.Request(), timeout=90)
-            if not response.success:
-                raise RuntimeError(f'负载恢复失败：{response.message}')
+            # 保留的恢复目标必须可用：搬运到放置点再松爪，而不是原地开爪。
+            moved, response = self.recover()
+            if not response.success or not moved:
+                raise AssertionError(f'带载取消后恢复目标不可用：success={response.success} '
+                                     f'moved={moved} {response.message}')
             scene = self.scene()
         released = next((item for item in scene.world.collision_objects if item.id == obj.object_id), None)
         still_attached = any(item.object.id == obj.object_id
@@ -243,10 +301,29 @@ class SceneCheck(Node):
         if not attached_seen or released is None or still_attached:
             raise AssertionError('抓放期间没有观察到附着，或释放后场景状态不正确')
         position = released.pose.position
-        if not cancel and (abs(position.x - 0.26) > 0.03 or abs(position.y + 0.06) > 0.03):
+        if abs(position.x - 0.26) > 0.03 or abs(position.y + 0.06) > 0.03:
             raise AssertionError(f'释放后的碰撞盒位置不在目标附近：{position}')
-        print('通过：取消后保留并显式释放附着物' if cancel else
-              '通过：抓放期间附着，释放后返回世界场景', flush=True)
+        if mode == 'grasp':
+            # 正常放置已清除恢复目标；空载调用恢复服务只开爪、不得移动手臂。
+            moved, response = self.recover()
+            if not response.success:
+                raise RuntimeError(f'空载恢复服务失败：{response.message}')
+            if moved:
+                raise AssertionError(f'空载调用恢复服务不应移动手臂：{response.message}')
+            final = self.scene()
+            if any(item.object.id == obj.object_id
+                   for item in final.robot_state.attached_collision_objects):
+                raise AssertionError('空载恢复服务不应附着物体')
+            if not any(item.id == obj.object_id for item in final.world.collision_objects):
+                raise AssertionError('空载恢复服务后物体不在世界场景')
+        if mode == 'cancel':
+            # 恢复服务已确认释放并清除目标；再次调用不应再移动手臂。
+            moved, response = self.recover()
+            if moved:
+                raise AssertionError(f'恢复服务成功后仍留下可用目标：{response.message}')
+        print({'grasp': '通过：正常放置后不留恢复目标，空载调用只开爪',
+               'cancel': '通过：带载取消保留可用目标，恢复服务搬运放置后清除'}
+              .get(mode), flush=True)
 
 
 def main():
@@ -254,8 +331,10 @@ def main():
     parser.add_argument('--ros-domain-id', type=int, default=185, help='本次独立测试使用的 ROS 域')
     parser.add_argument('--objects-topic', default='/perception/objects', help='测试使用的视觉物体话题')
     checks = parser.add_mutually_exclusive_group()
-    checks.add_argument('--grasp', action='store_true', help='额外执行单物块抓放，检查附着与释放')
-    checks.add_argument('--recovery', action='store_true', help='在附着后取消并检查显式释放')
+    checks.add_argument('--grasp', action='store_true', help='执行单物块抓放，检查附着、释放与目标清除')
+    checks.add_argument('--recovery', action='store_true', help='在附着后取消，检查保留目标可用且用后清除')
+    checks.add_argument('--desync', action='store_true',
+                        help='抓放途中从 MoveIt 侧抽掉附着，检查释放幂等自愈、不锁死执行器')
     args = parser.parse_args()
     env = os.environ.copy()
     env.update(ROS_DOMAIN_ID=str(args.ros_domain_id), ROS_LOCALHOST_ONLY='1')
@@ -285,8 +364,9 @@ def main():
             node = SceneCheck(process, args.objects_topic)
             node.check_world_and_snapshot()
             node.check_collision()
-            if args.grasp or args.recovery:
-                node.check_attachment(cancel=args.recovery)
+            mode = 'cancel' if args.recovery else 'desync' if args.desync else 'grasp'
+            if args.grasp or args.recovery or args.desync:
+                node.check_attachment(mode)
             print(f'规划场景测试通过；启动日志：{log_path}', flush=True)
             return 0
         except (AssertionError, OSError, RuntimeError) as error:

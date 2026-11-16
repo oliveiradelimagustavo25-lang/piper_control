@@ -41,9 +41,10 @@ struct MotionController::Impl
     if (!(options.velocity_scaling > 0 && options.velocity_scaling <= 1 &&
       options.acceleration_scaling > 0 && options.acceleration_scaling <= 1 &&
       std::isfinite(options.planning_time) && options.planning_time > 0 &&
-      std::isfinite(options.cartesian_step) && options.cartesian_step > 0))
+      std::isfinite(options.cartesian_step) && options.cartesian_step > 0 &&
+      std::isfinite(options.ik_timeout) && options.ik_timeout > 0))
     {
-      throw std::invalid_argument("Invalid motion scaling, planning time or Cartesian step");
+      throw std::invalid_argument("Invalid motion scaling, planning time, Cartesian step or IK timeout");
     }
     arm = std::make_unique<Group>(node, options.arm_group);
     gripper = std::make_unique<Group>(node, options.gripper_group);
@@ -75,7 +76,7 @@ struct MotionController::Impl
       pose = state.getGlobalLinkTransform(target.header.frame_id) * pose;
     }
     const auto * group = state.getJointModelGroup(options.arm_group);
-    return group && state.setFromIK(group, pose, arm->getEndEffectorLink(), 0.2);
+    return group && state.setFromIK(group, pose, arm->getEndEffectorLink(), options.ik_timeout);
   }
 
   bool planAndExecute(Group & group)
@@ -121,7 +122,7 @@ bool MotionController::canReachPose(const geometry_msgs::msg::PoseStamped & targ
   return state && impl_->solvePose(*state, target);
 }
 
-bool MotionController::canReleaseAt(const geometry_msgs::msg::PoseStamped & target,
+MotionController::ReleaseCheck MotionController::canReleaseAt(const geometry_msgs::msg::PoseStamped & target,
   const std::vector<double> & closed, const std::vector<double> & released,
   const moveit_msgs::msg::PlanningScene & scene_message)
 {
@@ -131,10 +132,10 @@ bool MotionController::canReleaseAt(const geometry_msgs::msg::PoseStamped & targ
   auto & state = scene.getCurrentStateNonConst();
   const auto * gripper = state.getJointModelGroup(impl_->options.gripper_group);
   if (!gripper || closed.size() != gripper->getVariableCount() ||
-    released.size() != closed.size() || !impl_->solvePose(state, target)) {return false;}
+    released.size() != closed.size() || !impl_->solvePose(state, target)) {return ReleaseCheck::IK_FAILED;}
   double distance = 0;
   for (size_t i = 0; i < closed.size(); ++i) {
-    if (!std::isfinite(closed[i]) || !std::isfinite(released[i])) {return false;}
+    if (!std::isfinite(closed[i]) || !std::isfinite(released[i])) {return ReleaseCheck::IK_FAILED;}
     distance = std::max(distance, std::abs(released[i] - closed[i]));
   }
   // 每根手指最多移动 1 mm 后检查一次；同时检查手臂、夹爪和周围物体。
@@ -148,10 +149,10 @@ bool MotionController::canReleaseAt(const geometry_msgs::msg::PoseStamped & targ
     state.update();
     if (!state.satisfiesBounds(gripper) || scene.isStateColliding(state)) {
       RCLCPP_WARN(impl_->node->get_logger(), "Placement gripper release is blocked");
-      return false;
+      return ReleaseCheck::BLOCKED;
     }
   }
-  return true;
+  return ReleaseCheck::OK;
 }
 
 bool MotionController::moveToNamedTarget(const std::string & name)

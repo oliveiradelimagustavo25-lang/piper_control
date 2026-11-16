@@ -39,11 +39,17 @@ class TaskPlanner : public rclcpp::Node
   using Class = uint16_t;
   using Slot = std::pair<Class, size_t>;
   enum class Phase {WAITING, OBSERVING, SENDING, EXECUTING, RECOVERING};
-  enum class RuleState {READY, RESERVED, PLACED, UNREACHABLE};
+  enum class RuleState {READY, RESERVED, PLACED};
+  enum class Shortage {NONE, OCCUPIED, REJECTED};
+  // 区域规则编译成绝对候选列表；点规则（绝对或相对）按物体冻结目标并保留尺寸预留。
+  enum class RuleKind {SLOT, POINT};
   struct RuleTarget {Class class_id; tf2::Vector3 goal, extent; RuleState state = RuleState::READY;};
   struct Attempt {int count = 0; rclcpp::Time retry_after{0, 0, RCL_ROS_TIME};};
+  // 候选因预检失败被拒；按候选记录次数与最近原因，条件变化后可有限次重评。
+  struct CandidateFailure {int attempts = 0; uint8_t reason = 0; int reevaluations = 0;};
   struct Verification {Object source; tf2::Vector3 target; Slot slot;};
   struct PlacementCheck {const Object * destination = nullptr; bool at_source = false, reliable = false;};
+  struct Reservation {tf2::Vector3 goal, extent;};
 
 public:
   TaskPlanner() : Node("task_planner"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
@@ -71,6 +77,8 @@ public:
     slots_full_policy_ = declare_parameter<std::string>("on_slots_full", "wait");
     verification_ = declare_parameter<std::string>("placement_verification", "visual");
     max_attempts_ = declare_parameter<int>("max_attempts", 3);
+    max_candidate_attempts_ = declare_parameter<int>("max_candidate_attempts", 2);
+    max_candidate_reevaluations_ = declare_parameter<int>("max_candidate_reevaluations", 1);
     max_objects_ = declare_parameter<int>("max_objects", 0);
     idle_timeout_ = declare_parameter<double>("idle_timeout", 3.0);
     cooldown_ = declare_parameter<double>("retry_cooldown", 0.0);
@@ -97,13 +105,15 @@ public:
     if (position_modes_.size() != 3 || !std::all_of(position_modes_.begin(), position_modes_.end(),
       [](const auto & mode) {return mode == "absolute" || mode == "relative";}))
     {throw std::invalid_argument("place_position_modes requires X/Y/Z relative or absolute");}
-    use_position_rules_ = declare_parameter<bool>("use_position_rules", false);
+    explicit_rules_ = declare_parameter<bool>("use_position_rules", false);
     // Discover explicit rules even when every referenced ID is unknown. Never
     // fall back to region coordinates after an explicit rule set was supplied.
     for (const auto & entry : get_node_parameters_interface()->get_parameter_overrides()) {
       const auto & name = entry.first;
-      if (name.rfind("place_positions.", 0) == 0) {use_position_rules_ = true;}
-      if (name.rfind("place_positions.", 0) == 0 || name.rfind("classes.", 0) == 0) {
+      const bool point = name.rfind("place_positions.", 0) == 0;
+      const bool region = name.rfind("place_regions.", 0) == 0;
+      if (point || region) {explicit_rules_ = true;}
+      if (point || region || name.rfind("classes.", 0) == 0) {
         try {
           const auto start = name.find('.') + 1;
           const auto id = name.substr(start, name.find('.', start) - start);
@@ -118,32 +128,33 @@ public:
     if (step.size() != 2 || !std::isfinite(step[0]) || !std::isfinite(step[1]) || step[0] <= 0 || step[1] <= 0) {
       throw std::invalid_argument("placement_step requires positive finite x/y spacing");
     }
+    const tf2::Vector3 spacing(step[0], step[1], 0.0);
+    std::string conflict;
     for (const auto & entry : classes_) {
       const auto id = entry.first;
       const auto key = std::to_string(id);
       try {
-        const auto rule = declare_parameter<std::vector<double>>("place_positions." + key, std::vector<double>{});
-        if (use_position_rules_) {
-          if (!rule.empty()) {position_values_[id] = xyz(rule);}
+        const auto point = declare_parameter<std::vector<double>>("place_positions." + key, std::vector<double>{});
+        const auto region = declare_parameter<std::vector<double>>("place_regions." + key, std::vector<double>{});
+        if (explicit_rules_) {
+          // 点与区域同时配置属于配置错误：记录后在循环外失败启动，不静默禁用类别。
+          if (!point.empty() && !region.empty()) {conflict = key; continue;}
+          if (!region.empty()) {
+            slots_[id] = regionGrid(region, regionOrigin(region), spacing, true);
+            rule_kind_[id] = RuleKind::SLOT;
+          } else if (!point.empty()) {
+            position_values_[id] = xyz(point);
+            rule_kind_[id] = RuleKind::POINT;
+          }
           continue;
         }
         const auto prefix = "classes." + key;
         const auto origin_values = declare_parameter<std::vector<double>>(prefix + ".place_position", std::vector<double>{});
         auto values = declare_parameter<std::vector<double>>(prefix + ".place_slots", std::vector<double>{});
-        const auto region = declare_parameter<std::vector<double>>(prefix + ".place_region", std::vector<double>{});
-        if (values.empty() && !region.empty()) {
-          if (region.size() != 5 || !std::all_of(region.begin(), region.end(), [](double v) {return std::isfinite(v);}) ||
-            region[0] > region[2] || region[1] > region[3]) {throw std::invalid_argument("invalid region");}
-          const auto origin = origin_values.empty() ? tf2::Vector3(region[0], region[1], region[4]) : xyz(origin_values);
-          std::vector<tf2::Vector3> points;
-          const int xmin = static_cast<int>(std::ceil((region[0] - origin.x()) / step[0] - 1e-9));
-          const int xmax = static_cast<int>(std::floor((region[2] - origin.x()) / step[0] + 1e-9));
-          const int ymin = static_cast<int>(std::ceil((region[1] - origin.y()) / step[1] - 1e-9));
-          const int ymax = static_cast<int>(std::floor((region[3] - origin.y()) / step[1] + 1e-9));
-          for (int y = ymin; y <= ymax; ++y) {
-            for (int x = xmin; x <= xmax; ++x) {points.emplace_back(origin.x() + x * step[0], origin.y() + y * step[1], region[4]);}
-          }
-          std::stable_sort(points.begin(), points.end(), [&](const auto & a, const auto & b) {return (a - origin).length2() < (b - origin).length2();});
+        const auto region_rule = declare_parameter<std::vector<double>>(prefix + ".place_region", std::vector<double>{});
+        if (values.empty() && !region_rule.empty()) {
+          const auto origin = origin_values.empty() ? regionOrigin(region_rule) : xyz(origin_values);
+          const auto points = regionGrid(region_rule, origin, spacing, false);
           for (const auto & point : points) {values.insert(values.end(), {point.x(), point.y(), point.z()});}
         }
         if (values.empty()) {values = origin_values;}
@@ -151,17 +162,22 @@ public:
         for (size_t i = 0; i < values.size(); i += 3) {slots_[id].push_back(xyz({values[i], values[i + 1], values[i + 2]}));}
         if (!values.empty()) {set_parameter(rclcpp::Parameter(prefix + ".place_slots", values));}
         if (slots_[id].empty()) {slots_.erase(id);}
+        else {rule_kind_[id] = RuleKind::SLOT;}
       } catch (const std::exception & error) {
-        slots_.erase(id); position_values_.erase(id);
+        slots_.erase(id); position_values_.erase(id); rule_kind_.erase(id);
         RCLCPP_WARN(get_logger(), "Class %u placement disabled: %s", id, error.what());
       }
+    }
+    if (!conflict.empty()) {
+      throw std::invalid_argument("Class " + conflict + " defines both place_positions and place_regions");
     }
     if (!validPolicy(default_strategy_, default_order_) || frame_.empty() || tool_frame_.empty() ||
       (finish_mode_ != "batch" && finish_mode_ != "watch") ||
       (retry_policy_ != "priority" && retry_policy_ != "immediate" && retry_policy_ != "disabled") ||
       (exhausted_policy_ != "continue" && exhausted_policy_ != "stop") ||
       (slots_full_policy_ != "wait" && slots_full_policy_ != "finish") ||
-      (verification_ != "visual" && verification_ != "motion") || max_attempts_ < 1 || max_objects_ < 0)
+      (verification_ != "visual" && verification_ != "motion") || max_attempts_ < 1 ||
+      max_candidate_attempts_ < 1 || max_candidate_reevaluations_ < 0 || max_objects_ < 0)
     {throw std::invalid_argument("Invalid task policy");}
     for (const double value : {max_age_, timeout_, action_timeout_, recovery_timeout_,
       verify_timeout_, slot_tolerance_, height_tolerance_})
@@ -197,7 +213,12 @@ public:
         attempts_.clear();
         pending_verifications_.clear();
         skipped_.clear();
-        unreachable_slots_.clear();
+        slot_failures_.clear();
+        rule_failures_.clear();
+        precondition_failures_.clear();
+        rejection_counts_.clear();
+        scene_signature_.clear();
+        shortage_ = Shortage::NONE;
         rule_targets_.clear();
         completed_ = 0;
         verifying_ = idle_ = cancel_sent_ = false;
@@ -220,6 +241,42 @@ private:
   }
   static tf2::Vector3 position(const Object & o)
   {return {o.pose.position.x, o.pose.position.y, o.pose.position.z};}
+  // 区域规则按间距生成候选；区域坐标始终是 base_link 下的绝对值。
+  // 绝对规则先试半径小的候选：固定向下姿态下远点更容易先撞 joint5 限位。
+  // 先校验长度与边界再取元素：短数组直接抛错，不能越界访问。
+  static tf2::Vector3 regionOrigin(const std::vector<double> & region)
+  {
+    if (region.size() != 5 || !std::all_of(region.begin(), region.end(), [](double v) {return std::isfinite(v);}) ||
+      region[0] > region[2] || region[1] > region[3])
+    {throw std::invalid_argument("region requires [xmin,ymin,xmax,ymax,z] with min <= max");}
+    return {region[0], region[1], region[4]};
+  }
+  static std::vector<tf2::Vector3> regionGrid(const std::vector<double> & region,
+    const tf2::Vector3 & origin, const tf2::Vector3 & step, bool nearest_first)
+  {
+    if (region.size() != 5 || !std::all_of(region.begin(), region.end(), [](double v) {return std::isfinite(v);}) ||
+      region[0] > region[2] || region[1] > region[3])
+    {throw std::invalid_argument("region requires [xmin,ymin,xmax,ymax,z] with min <= max");}
+    std::vector<tf2::Vector3> points;
+    const int xmin = static_cast<int>(std::ceil((region[0] - origin.x()) / step.x() - 1e-9));
+    const int xmax = static_cast<int>(std::floor((region[2] - origin.x()) / step.x() + 1e-9));
+    const int ymin = static_cast<int>(std::ceil((region[1] - origin.y()) / step.y() - 1e-9));
+    const int ymax = static_cast<int>(std::floor((region[3] - origin.y()) / step.y() + 1e-9));
+    for (int y = ymin; y <= ymax; ++y) {
+      for (int x = xmin; x <= xmax; ++x) {
+        points.emplace_back(origin.x() + x * step.x(), origin.y() + y * step.y(), region[4]);
+      }
+    }
+    if (points.empty()) {throw std::invalid_argument("region produced no candidate points");}
+    if (nearest_first) {
+      std::stable_sort(points.begin(), points.end(),
+        [](const auto & a, const auto & b) {return std::hypot(a.x(), a.y()) < std::hypot(b.x(), b.y());});
+    } else {
+      std::stable_sort(points.begin(), points.end(),
+        [&](const auto & a, const auto & b) {return (a - origin).length2() < (b - origin).length2();});
+    }
+    return points;
+  }
   static bool validPolicy(const std::string & strategy, const std::vector<Class> & order)
   {
     const std::set<Class> ids(order.begin(), order.end());
@@ -237,12 +294,74 @@ private:
     return result;
   }
   bool hasPlacement(Class id) const
-  {return use_position_rules_ ? position_values_.count(id) : slots_.count(id);}
+  {return pointRule(id) ? position_values_.count(id) > 0 : slots_.count(id) > 0;}
+  bool pointRule(Class id) const
+  {
+    const auto rule = rule_kind_.find(id);
+    return rule != rule_kind_.end() && rule->second == RuleKind::POINT;
+  }
   void skip(const Object & object, const std::string & reason)
   {
     if (skipped_.emplace(object.object_id, reason).second) {
       RCLCPP_WARN(get_logger(), "Skipping %s class=%u: %s", object.object_id.c_str(), object.class_id, reason.c_str());
     }
+  }
+  static const char * precheckName(uint8_t stage)
+  {
+    switch (stage) {
+      case 1: return "pre_grasp_ik";
+      case 2: return "place_ik";
+      case 3: return "release_space";
+      case 4: return "precondition";
+      default: return "none";
+    }
+  }
+  void noteCandidateFailure(uint8_t reason)
+  {
+    CandidateFailure & failure = pointRule(active_object_.class_id) ?
+      rule_failures_[active_object_.object_id] : slot_failures_[active_slot_];
+    ++failure.attempts;
+    failure.reason = reason;
+    ++rejection_counts_[reason];
+    RCLCPP_WARN(get_logger(), "Placement candidate for %s rejected (%s, %d/%d)",
+      active_object_.object_id.c_str(), precheckName(reason), failure.attempts, max_candidate_attempts_);
+  }
+  // 场景变化只让每个候选复活有限次：目标冻结时无限重评会形成活锁。
+  template<typename Map>
+  int rearmCandidateFailures(Map & failures)
+  {
+    int rearmed = 0;
+    for (auto & entry : failures) {
+      auto & failure = entry.second;
+      if (failure.attempts < max_candidate_attempts_ ||
+        failure.reevaluations >= max_candidate_reevaluations_) {continue;}
+      failure.attempts = 0;
+      ++failure.reevaluations;
+      ++rearmed;
+    }
+    return rearmed;
+  }
+  // 物体位置量化到 1 cm；有意义的环境变化才允许重新评估被拒候选。
+  static std::string sceneSignature(const std::vector<Object> & objects)
+  {
+    std::vector<std::string> parts;
+    for (const auto & o : objects) {
+      if (o.tracking_uncertain) {continue;}
+      const auto & p = o.pose.position;
+      parts.push_back(o.object_id + "@" + std::to_string(std::lround(p.x * 100)) + "," +
+        std::to_string(std::lround(p.y * 100)) + "," + std::to_string(std::lround(p.z * 100)));
+    }
+    std::sort(parts.begin(), parts.end());
+    std::string result;
+    for (const auto & part : parts) {result += part + ";";}
+    return result;
+  }
+  std::string shortageText() const
+  {
+    if (shortage_ == Shortage::REJECTED) {
+      return "Placement candidates rejected by precheck; no alternative target";
+    }
+    return "Placement area full";
   }
   static tf2::Vector3 extent(const Object & object)
   {
@@ -286,31 +405,42 @@ private:
     return std::any_of(observations_->issues.begin(), observations_->issues.end(),
       [&](const auto & issue) {return issue.rfind(prefix, 0) == 0;});
   }
-  void markPlaced(const std::string & source_id, Slot slot, const std::string & observed_id)
+  void markPlaced(const Object & source, Slot slot, const std::string & observed_id)
   {
-    if (use_position_rules_) {
-      auto target = rule_targets_.at(source_id);
+    if (pointRule(slot.first)) {
+      auto target = rule_targets_.at(source.object_id);
       target->state = RuleState::PLACED;
       if (!observed_id.empty()) {rule_targets_[observed_id] = target;}
-    } else {occupied_[slot] = observed_id;}
+    } else {
+      occupied_[slot] = observed_id;
+      occupied_extent_[slot] = extent(source);
+    }
   }
   void confirmPlacement(const Object & source, Slot slot, const std::string & observed_id)
   {
-    markPlaced(source.object_id, slot, observed_id);
+    markPlaced(source, slot, observed_id);
     attempts_.erase(source.object_id);
     ++completed_;
     feedback(source.object_id);
     RCLCPP_INFO(get_logger(), "Placement verified: %s", source.object_id.c_str());
   }
+  void reserveSlot(const Slot & slot)
+  {
+    occupied_[slot] = "";
+    occupied_extent_[slot] = extent(active_object_);
+  }
   void releaseReservation(const std::string & id, Slot slot)
   {
-    if (use_position_rules_) {rule_targets_.at(id)->state = RuleState::READY;}
-    else {occupied_.erase(slot);}
+    if (pointRule(slot.first)) {rule_targets_.at(id)->state = RuleState::READY;}
+    else {
+      occupied_.erase(slot);
+      occupied_extent_.erase(slot);
+    }
   }
   bool sorted(const Object & o) const
   {
     if (!hasPlacement(o.class_id)) {return false;}
-    if (use_position_rules_) {
+    if (pointRule(o.class_id)) {
       if (near(position(o), ruleGoal(o))) {return true;}
       return std::any_of(rule_targets_.begin(), rule_targets_.end(), [&](const auto & entry) {
         const auto & target = *entry.second;
@@ -375,6 +505,10 @@ private:
       ", unresolved_attempted_targets=" + std::to_string(attempts_.size());
     for (const auto & entry : attempts_) {
       result->message += " [" + entry.first + ":" + std::to_string(entry.second.count) + " attempts]";
+    }
+    for (const auto & entry : rejection_counts_) {
+      result->message += " [candidate " + std::string(precheckName(entry.first)) + ":" +
+        std::to_string(entry.second) + "]";
     }
     result->message += ", skipped_targets=" + std::to_string(skipped_.size());
     for (const auto & entry : skipped_) {result->message += " [" + entry.first + ":" + entry.second + "]";}
@@ -480,8 +614,8 @@ private:
         if (task->is_canceling()) {finish(false, "Canceled after recovery", true); return;}
         verifying_ = recovery_holding_;
         if (verifying_) {
-          if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
-          else {occupied_[active_slot_] = "";}
+          if (pointRule(active_object_.class_id)) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
+          else {reserveSlot(active_slot_);}
         }
         if (!verifying_) {failed("Recovered; reacquiring target"); if (!task_) {return;}}
         restartObservation();
@@ -500,61 +634,116 @@ private:
              std::abs(delta.z()) < total.z() + slot_clearance_;
     });
   }
-  int freeSlot(const Object & object, const std::vector<Object> & objects) const
+  // 汇总已预留、但当前可能漏检的目标：点规则用冻结目标，槽位/区域规则用占用槽位。
+  std::vector<Reservation> reservations(const Object & object) const
   {
-    if (use_position_rules_) {
-      const auto own = rule_targets_.find(object.object_id);
-      if (own != rule_targets_.end() && own->second->state == RuleState::UNREACHABLE) {return -1;}
-      const auto goal = ruleGoal(object);
-      if (blocked(object, goal, objects)) {return -1;}
-      for (const auto & entry : rule_targets_) {
-        const auto & target = *entry.second;
-        if (own != rule_targets_.end() && own->second == entry.second) {continue;}
-        if ((target.state == RuleState::RESERVED || target.state == RuleState::PLACED) &&
-          std::abs(goal.x() - target.goal.x()) < extent(object).x() + target.extent.x() + slot_clearance_ &&
-          std::abs(goal.y() - target.goal.y()) < extent(object).y() + target.extent.y() + slot_clearance_ &&
-          std::abs(goal.z() - target.goal.z()) < extent(object).z() + target.extent.z() + slot_clearance_) {return -1;}
+    std::vector<Reservation> result;
+    const auto own_target = rule_targets_.find(object.object_id);
+    for (const auto & entry : rule_targets_) {
+      const auto & target = *entry.second;
+      if (target.state == RuleState::READY ||
+        (own_target != rule_targets_.end() && own_target->second == entry.second)) {continue;}
+      result.push_back({target.goal, target.extent});
+    }
+    for (const auto & entry : occupied_) {
+      const auto known = occupied_extent_.find(entry.first);
+      if (known == occupied_extent_.end()) {continue;}
+      result.push_back({slots_.at(entry.first.first)[entry.first.second], known->second});
+    }
+    return result;
+  }
+  bool overlaps(const Object & object, const tf2::Vector3 & goal,
+    const std::vector<Reservation> & reserved) const
+  {
+    const auto own = extent(object);
+    return std::any_of(reserved.begin(), reserved.end(), [&](const auto & r) {
+      return std::abs(goal.x() - r.goal.x()) < own.x() + r.extent.x() + slot_clearance_ &&
+             std::abs(goal.y() - r.goal.y()) < own.y() + r.extent.y() + slot_clearance_ &&
+             std::abs(goal.z() - r.goal.z()) < own.z() + r.extent.z() + slot_clearance_;
+    });
+  }
+  int freeSlot(const Object & object, const std::vector<Object> & objects,
+    Shortage * shortage = nullptr)
+  {
+    if (shortage) {*shortage = Shortage::NONE;}
+    const auto reserved = reservations(object);
+    if (pointRule(object.class_id)) {
+      const auto failed = rule_failures_.find(object.object_id);
+      if (failed != rule_failures_.end() &&
+        failed->second.attempts >= max_candidate_attempts_)
+      {
+        if (shortage) {*shortage = Shortage::REJECTED;}
+        return -1;
       }
+      const auto goal = ruleGoal(object);
+      if (blocked(object, goal, objects) || overlaps(object, goal, reserved)) {
+        if (shortage) {*shortage = Shortage::OCCUPIED;}
+        return -1;
+      }
+      // 单点规则没有其他候选；被拒但未达上限时重试本目标。
       return 0;
     }
+    int retry = -1;
     for (size_t i = 0; i < slots_.at(object.class_id).size(); ++i) {
-      if (occupied_.count({object.class_id, i}) || unreachable_slots_.count({object.class_id, i})) {continue;}
-      if (!blocked(object, slots_.at(object.class_id)[i], objects)) {return static_cast<int>(i);}
+      const Slot slot{object.class_id, i};
+      if (occupied_.count(slot)) {
+        if (shortage) {*shortage = Shortage::OCCUPIED;}
+        continue;
+      }
+      if (blocked(object, slots_.at(object.class_id)[i], objects) ||
+        overlaps(object, slots_.at(object.class_id)[i], reserved)) {
+        if (shortage) {*shortage = Shortage::OCCUPIED;}
+        continue;
+      }
+      const auto failed = slot_failures_.find(slot);
+      if (failed != slot_failures_.end()) {
+        if (failed->second.attempts >= max_candidate_attempts_) {
+          if (shortage) {*shortage = Shortage::REJECTED;}
+          continue;
+        }
+        // 先尝试从未失败的候选；都试过后再按上限重试被拒候选。
+        if (retry < 0) {retry = static_cast<int>(i);}
+        continue;
+      }
+      return static_cast<int>(i);
     }
+    if (retry >= 0) {return retry;}
     return -1;
   }
   void updateOccupancy(const std::vector<Object> & objects)
   {
-    if (use_position_rules_) {
-      for (const auto & o : objects) {
-        if (o.tracking_uncertain || !hasPlacement(o.class_id)) {continue;}
-        const auto known = rule_targets_.find(o.object_id);
-        if (known != rule_targets_.end() && known->second->state == RuleState::PLACED &&
-          !near(position(o), known->second->goal)) {known->second->state = RuleState::READY;}
-        // 视觉 ID 变化时，把已核验目标位的新 ID 关联到同一条规则记录。
-        for (const auto & entry : rule_targets_) {
-          if (entry.second->state == RuleState::PLACED && entry.second->class_id == o.class_id &&
-            near(position(o), entry.second->goal)) {
-            rule_targets_[o.object_id] = entry.second;
-            break;
-          }
+    // 相对规则：目标随物体冻结，按目标位维护状态与跨 ID 关联。
+    for (const auto & o : objects) {
+      if (o.tracking_uncertain || !hasPlacement(o.class_id) || !pointRule(o.class_id)) {continue;}
+      const auto known = rule_targets_.find(o.object_id);
+      if (known != rule_targets_.end() && known->second->state == RuleState::PLACED &&
+        !near(position(o), known->second->goal)) {known->second->state = RuleState::READY;}
+      // 视觉 ID 变化时，把已核验目标位的新 ID 关联到同一条规则记录。
+      for (const auto & entry : rule_targets_) {
+        if (entry.second->state == RuleState::PLACED && entry.second->class_id == o.class_id &&
+          near(position(o), entry.second->goal)) {
+          rule_targets_[o.object_id] = entry.second;
+          break;
         }
       }
-      return;
     }
-    // 只有已关联物体明确移开才释放缓存；漏检/离开视野不等于槽位已空。
+    // 槽位/绝对规则：只有已关联物体明确移开才释放缓存；漏检/离开视野不等于槽位已空。
     for (auto it = occupied_.begin(); it != occupied_.end();) {
       const auto moved = std::find_if(objects.begin(), objects.end(), [&](const auto & o) {
         return !o.tracking_uncertain && o.object_id == it->second &&
                !near(position(o), slots_.at(it->first.first)[it->first.second]);
       });
-      if (moved != objects.end()) {it = occupied_.erase(it);} else {++it;}
+      if (moved != objects.end()) {
+        occupied_extent_.erase(it->first);
+        it = occupied_.erase(it);
+      } else {++it;}
     }
     for (const auto & o : objects) {
-      if (o.tracking_uncertain || !hasPlacement(o.class_id)) {continue;}
+      if (o.tracking_uncertain || !hasPlacement(o.class_id) || pointRule(o.class_id)) {continue;}
       for (size_t i = 0; i < slots_.at(o.class_id).size(); ++i) {
         if (near(position(o), slots_.at(o.class_id)[i])) {
           occupied_[{o.class_id, i}] = o.object_id;
+          occupied_extent_[{o.class_id, i}] = extent(o);
           if (!verifying_ || o.object_id != active_object_.object_id) {attempts_.erase(o.object_id);}
         }
       }
@@ -642,7 +831,7 @@ private:
     goal.object_pose.pose = object.pose;
     goal.object_dimensions = object.dimensions;
     goal.place_pose.header.frame_id = frame_;
-    if (use_position_rules_) {
+    if (pointRule(object.class_id)) {
       const auto target = ruleGoal(object);
       if (!rule_targets_.count(object.object_id)) {
         rule_targets_[object.object_id] = std::make_shared<RuleTarget>(RuleTarget{object.class_id, target, extent(object)});
@@ -683,18 +872,32 @@ private:
       }
       if (!result.result) {startRecovery(false); return;}
       const auto & r = *result.result;
-      if (!r.ready_for_next_pick || r.holding) {startRecovery(r.holding); return;}
+      if (r.holding) {startRecovery(true); return;}
+      if (r.precheck_failure == Pick::Result::PRECHECK_PRECONDITION) {
+        // 观测、尺寸、朝向等前提错误：不消耗抓取尝试，也不判候选不可用；有限次后跳过该物体。
+        const auto failures = ++precondition_failures_[active_object_.object_id];
+        auto & count = attempts_[active_object_.object_id].count;
+        if (count > 0 && --count == 0) {attempts_.erase(active_object_.object_id);}
+        if (failures >= max_attempts_) {
+          skip(active_object_, "precondition: " + r.message);
+        } else {
+          RCLCPP_WARN(get_logger(), "Precondition failure for %s (%d/%d): %s",
+            active_object_.object_id.c_str(), failures, max_attempts_, r.message.c_str());
+        }
+        restartObservation();
+        return;
+      }
+      if (!r.ready_for_next_pick) {startRecovery(false); return;}
       if (r.unreachable_placement) {
-        if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::UNREACHABLE;}
-        else {unreachable_slots_.insert(active_slot_);}
+        noteCandidateFailure(r.precheck_failure);
+        // 放置预检失败发生在抓取前，退款物体尝试次数；候选按自身上限重试或切换。
         auto & count = attempts_[active_object_.object_id].count;
         if (--count <= 0) {attempts_.erase(active_object_.object_id);}
-        RCLCPP_WARN(get_logger(), "Placement candidate unreachable; selecting another slot/target");
       } else if (r.released) {
-        if (use_position_rules_) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
-        else {occupied_[active_slot_] = "";}
+        if (pointRule(active_object_.class_id)) {rule_targets_.at(active_object_.object_id)->state = RuleState::RESERVED;}
+        else {reserveSlot(active_slot_);}
         if (verification_ == "motion") {
-          markPlaced(active_object_.object_id, active_slot_, "");
+          markPlaced(active_object_, active_slot_, "");
           attempts_.erase(active_object_.object_id);
           ++completed_; feedback(active_object_.object_id);
         } else {verifying_ = true;}
@@ -740,6 +943,16 @@ private:
       if (processed_sequence_ == sequence_) {return;}
       processed_sequence_ = sequence_;
       const auto objects = objectsInBase();
+      // 有意义的环境变化（物体位置量化到 1 cm）允许有限次重评被拒候选。
+      const auto signature = sceneSignature(objects);
+      if (!scene_signature_.empty() && signature != scene_signature_) {
+        const int rearmed = rearmCandidateFailures(slot_failures_) + rearmCandidateFailures(rule_failures_);
+        if (rearmed > 0) {
+          RCLCPP_INFO(get_logger(), "Scene changed; re-evaluating %d rejected placement candidate(s)", rearmed);
+        }
+      }
+      scene_signature_ = signature;
+      shortage_ = Shortage::NONE;
       verifyPending(objects);
       updateOccupancy(objects);
       if (verification_since_.nanoseconds() == 0 && verifying_) {verification_since_ = now();}
@@ -763,7 +976,17 @@ private:
           if (attempt->second.count >= max_attempts_) {continue;}
           if (now() < attempt->second.retry_after) {deferred = true; continue;}
         }
-        if (freeSlot(o, objects) < 0) {no_slots = true; continue;}
+        const auto precondition = precondition_failures_.find(o.object_id);
+        if (precondition != precondition_failures_.end() && precondition->second >= max_attempts_) {
+          continue;
+        }
+        Shortage shortage = Shortage::NONE;
+        if (freeSlot(o, objects, &shortage) < 0) {
+          if (shortage == Shortage::REJECTED) {shortage_ = Shortage::REJECTED;}
+          else if (shortage_ == Shortage::NONE) {shortage_ = shortage;}
+          no_slots = true;
+          continue;
+        }
         candidates.push_back(o);
       }
       if (!candidates.empty()) {
@@ -772,11 +995,16 @@ private:
         const auto object = selectTarget(candidates);
         dispatch(object, static_cast<size_t>(freeSlot(object, objects)));
       } else if (deferred || (no_slots && slots_full_policy_ == "wait")) {
-        waiting(no_slots ? "No free placement slot; waiting for space" : "Waiting for association/retry eligibility");
+        waiting(no_slots ?
+          (shortage_ == Shortage::REJECTED ?
+          "Placement candidates rejected by precheck; waiting for change" :
+          "No free placement slot; waiting for space") :
+          "Waiting for association/retry eligibility");
       } else if (finish_mode_ == "batch" && idle_timeout_ > 0) {
         if (!idle_) {idle_since_ = now(); idle_ = true;}
         if ((now() - idle_since_).seconds() >= idle_timeout_) {
-          finish(attempts_.empty() && !no_slots && skipped_.empty() && observations_->issues.empty() && !classes_.empty(), no_slots ? "Placement area full" : "No remaining actionable targets");
+          finish(attempts_.empty() && !no_slots && skipped_.empty() && observations_->issues.empty() && !classes_.empty(),
+            no_slots ? shortageText() : "No remaining actionable targets");
         }
       }
     } catch (const std::exception & error) {waiting(error.what());}
@@ -802,9 +1030,17 @@ private:
   std::vector<std::string> position_modes_;
   std::map<std::string, std::shared_ptr<RuleTarget>> rule_targets_;
   tf2::Vector3 active_destination_;
-  bool use_position_rules_ = false;
-  std::set<Slot> unreachable_slots_;  // 仅本任务，抓前 IK 不可达的候选位置。
+  bool explicit_rules_ = false;  // 显式规则集存在时不再回退 legacy classes.*
+  std::map<Class, RuleKind> rule_kind_;
+  // 被预检拒绝的候选：绝对规则按槽位、相对规则按对象冻结目标记录。
+  std::map<Slot, CandidateFailure> slot_failures_;
+  std::map<std::string, CandidateFailure> rule_failures_;
+  std::map<std::string, int> precondition_failures_;
+  std::map<uint8_t, int> rejection_counts_;
+  std::string scene_signature_;
+  Shortage shortage_ = Shortage::NONE;
   std::map<Slot, std::string> occupied_;  // 跨任务保留，最新观测可更新实际占用。
+  std::map<Slot, tf2::Vector3> occupied_extent_;  // 预留尺寸：漏检时仍能阻止重叠目标。
   std::map<std::string, Attempt> attempts_;
   Object active_object_;
   Slot active_slot_{};
@@ -818,7 +1054,7 @@ private:
   Clock::time_point action_since_, next_try_, recovery_since_;
   double max_age_, timeout_, action_timeout_, recovery_timeout_, settle_time_, idle_timeout_;
   double cooldown_, verify_timeout_, slot_tolerance_, height_tolerance_, slot_clearance_;
-  int max_attempts_, max_objects_;
+  int max_attempts_, max_candidate_attempts_, max_candidate_reevaluations_, max_objects_;
   int64_t recovery_request_id_ = 0;
   uint64_t sequence_ = 0, processed_sequence_ = 0;
   uint32_t completed_ = 0;

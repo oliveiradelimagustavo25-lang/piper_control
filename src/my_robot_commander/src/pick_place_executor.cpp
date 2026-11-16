@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -93,6 +94,7 @@ public:
     options.acceleration_scaling = parameter(node_, "acceleration_scaling", options.acceleration_scaling);
     options.planning_time = parameter(node_, "planning_time", options.planning_time);
     options.cartesian_step = parameter(node_, "cartesian_step", options.cartesian_step);
+    options.ik_timeout = parameter(node_, "ik_timeout", options.ik_timeout);
     tool_to_tcp_ = vector3(parameter<std::vector<double>>(node_, "tool_to_tcp", {0, 0, 0.132}));
     offset_ = vector3(parameter<std::vector<double>>(node_, "grasp_offset", {0, 0, 0}));
     const auto rpy = vector3(parameter<std::vector<double>>(
@@ -129,8 +131,14 @@ public:
     const auto name = parameter<std::string>(node_, "action_name", "/manipulation/pick_place");
     server_ = rclcpp_action::create_server<Action>(node_, name,
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const Action::Goal> goal) {
-        if (!validGoal(*goal) || holding_ || busy_.exchange(true)) {
-          RCLCPP_WARN(node_->get_logger(), "Rejected invalid/busy goal or object still held");
+        // 共享状态只在持有 busy_ 后读写；重排后拒绝分支必须归还，否则永久锁死。
+        if (busy_.exchange(true)) {
+          RCLCPP_WARN(node_->get_logger(), "Rejected busy goal");
+          return rclcpp_action::GoalResponse::REJECT;
+        }
+        if (!validGoal(*goal) || holding_ || scene_->holding()) {
+          busy_ = false;
+          RCLCPP_WARN(node_->get_logger(), "Rejected invalid goal or object still held");
           return rclcpp_action::GoalResponse::REJECT;
         }
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
@@ -149,7 +157,11 @@ public:
     named_server_ = rclcpp_action::create_server<NamedAction>(node_,
       parameter<std::string>(node_, "move_to_named_action", "/manipulation/move_to_named"),
       [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const NamedAction::Goal> goal) {
-        if (goal->target.empty() || busy_.exchange(true)) {
+        if (busy_.exchange(true)) {
+          return rclcpp_action::GoalResponse::REJECT;
+        }
+        if (goal->target.empty()) {
+          busy_ = false;
           return rclcpp_action::GoalResponse::REJECT;
         }
         return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
@@ -171,28 +183,57 @@ public:
           return;
         }
         try {
+          const bool loaded = holding_ || scene_->holding();
+          double width = open_width_;
+          bool scene_only = false;
           // 带载时先沿已配置的目标卸载；不在失败点直接松爪。
-          if (holding_ || scene_->holding()) {
-            const auto transform = tf_buffer_.lookupTransform(frame_, tool_frame_, tf2::TimePointZero);
-            tf2::Transform tool;
-            tf2::fromMsg(transform.transform, tool);
-            auto lifted = tool * tool_to_tcp_;
-            lifted.setZ(std::max(lifted.z(), recovery_above_.z()));
-            if (!recovery_available_ ||
-              !motion_->moveToPose(toolPose(lifted, tool_rotation_, tool_to_tcp_, frame_), true) ||
-              !motion_->moveToPose(toolPose(recovery_above_, tool_rotation_, tool_to_tcp_, frame_)) ||
-              !motion_->moveToPose(toolPose(recovery_tcp_, tool_rotation_, tool_to_tcp_, frame_), true))
-            {
-              throw std::runtime_error("Cannot reach recovery placement; load retained");
+          if (loaded) {
+            if (!recovery_) {
+              throw std::runtime_error(
+                "Load present without a recovery target; move the arm manually before releasing");
+            }
+            const auto target = *recovery_;
+            scene_only = target.scene_only;
+            // scene_only 表示夹爪已张开、只剩 MoveIt 附着；重走放置路径会去卸载早已落定的物块。
+            if (!scene_only) {
+              const auto transform = tf_buffer_.lookupTransform(frame_, tool_frame_, tf2::TimePointZero);
+              tf2::Transform tool;
+              tf2::fromMsg(transform.transform, tool);
+              auto lifted = tool * tool_to_tcp_;
+              lifted.setZ(std::max(lifted.z(), target.above.z()));
+              if (!motion_->moveToPose(toolPose(lifted, tool_rotation_, tool_to_tcp_, frame_), true) ||
+                !motion_->moveToPose(toolPose(target.above, tool_rotation_, tool_to_tcp_, frame_)) ||
+                !motion_->moveToPose(toolPose(target.tcp, tool_rotation_, tool_to_tcp_, frame_), true))
+              {
+                throw std::runtime_error("Cannot reach recovery placement; load retained");
+              }
+              width = target.release_width;
             }
           }
-          const double width = holding_ || scene_->holding() ? recovery_release_width_ : open_width_;
-          if (!motion_->moveGripperToJoints(gripperJoints(width))) {throw std::runtime_error("Opening gripper failed");}
-          if (scene_->holding()) {scene_->release();}
+          if (!scene_only && !motion_->moveGripperToJoints(gripperJoints(width))) {
+            throw std::runtime_error("Opening gripper failed");
+          }
+          if (loaded && !scene_only) {
+            // 张爪命令已完成；场景更新失败时重试只处理附着状态。
+            holding_ = false;
+            recovery_->scene_only = true;
+          }
+          if (scene_->holding()) {
+            try {
+              scene_->release();
+            } catch (const std::exception & error) {
+              throw std::runtime_error(
+                (scene_only ? "Stale MoveIt attachment could not be released: "
+                 : "Gripper opened but MoveIt attachment release failed: ") + std::string(error.what()));
+            }
+          }
           holding_ = false;
           scene_->restoreTouch();
+          recovery_.reset();
           response->success = true;
-          response->message = "Recovery placement/opening completed; verify using fresh observations";
+          response->message = scene_only ?
+            "Gripper was already open; stale MoveIt attachment cleared without moving the arm" :
+            "Recovery placement/opening completed; verify using fresh observations";
         } catch (const std::exception & error) {
           response->message = error.what();
         }
@@ -288,7 +329,9 @@ private:
   {
     auto result = std::make_shared<Action::Result>();
     bool gripper_open = false;
-    recovery_available_ = false;
+    recovery_.reset();
+    // 记录失败发生在哪个预检阶段，随结果返回；运动阶段的失败保持 NONE。
+    uint8_t precheck = Action::Result::PRECHECK_NONE;
     auto feedback = std::make_shared<Action::Feedback>();
     const auto stage = [&](uint8_t value, const std::string & message) {
       feedback->stage = value;
@@ -316,6 +359,7 @@ private:
 
     try {
       stage(Action::Feedback::PREPARING, "Preparing object and tool targets");
+      precheck = Action::Result::PRECHECK_PRECONDITION;
       const auto goal = handle->get_goal();
       const auto stamp = rclcpp::Time(goal->object_pose.header.stamp, node_->get_clock()->get_clock_type());
       if (stamp.nanoseconds() != 0 && max_age_ > 0) {
@@ -332,7 +376,6 @@ private:
       }
       const double closed_width = std::max(0.0, grasp_width_ - compression_);
       const double release_width = std::min(open_width_, std::max(width, grasp_width_) + release_margin_);
-      recovery_release_width_ = release_width;
       const tf2::Vector3 pick = tf2::Vector3(object.pose.position.x,
         object.pose.position.y, object.pose.position.z) + offset_;
       const tf2::Vector3 put = tf2::Vector3(place.pose.position.x,
@@ -344,13 +387,13 @@ private:
       if (object_q.angleShortestPath(place_q) > 0.01) {
         throw std::runtime_error("This executor requires matching pick/place object orientation");
       }
+      // 前提检查全部通过；此后的失败与预检前提无关。
+      precheck = Action::Result::PRECHECK_NONE;
       const auto pre_pick = pick + tf2::Vector3(0, 0, approach_);
       const double safe_z = std::max({transport_z_, pick.z() + lift_, put.z() + retreat_});
       const tf2::Vector3 lifted(pick.x(), pick.y(), safe_z);
       const tf2::Vector3 pre_place(put.x(), put.y(), safe_z);
-      recovery_tcp_ = put;
-      recovery_above_ = pre_place;
-      recovery_available_ = true;
+      recovery_ = RecoveryTarget{put, pre_place, release_width};
 
       syncScene();
       scene_->prepare(goal->object_id, object, goal->object_dimensions, goal->class_id);
@@ -359,14 +402,39 @@ private:
       step("Open gripper", [&]() { return grip(open_width_); });
       auto placed_object = place;
       placed_object.pose.position.z += clearance_;
-      if (!motion_->canReachPose(toolPose(pre_place, tool_rotation_, tool_to_tcp_, frame_)) ||
-        !motion_->canReleaseAt(toolPose(put, tool_rotation_, tool_to_tcp_, frame_),
-          gripperJoints(closed_width), gripperJoints(release_width), scene_->placementScene(placed_object)))
-      {
+      const auto pre_place_tool = toolPose(pre_place, tool_rotation_, tool_to_tcp_, frame_);
+      const auto put_tool = toolPose(put, tool_rotation_, tool_to_tcp_, frame_);
+      // 单次 IK 未求出不代表物理不可达：记录阶段与工具目标位姿，供对照实验归因。
+      const auto logTarget = [&](const char * stage_name, const geometry_msgs::msg::PoseStamped & pose) {
+        RCLCPP_WARN(node_->get_logger(),
+          "%s failed: tool pose (%.4f, %.4f, %.4f) quat (%.3f, %.3f, %.3f, %.3f) in %s",
+          stage_name, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
+          pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z,
+          pose.pose.orientation.w, pose.header.frame_id.c_str());
+      };
+      precheck = Action::Result::PRECHECK_PRE_GRASP_IK;
+      if (!motion_->canReachPose(pre_place_tool)) {
+        logTarget("Pre-grasp placement IK", pre_place_tool);
         result->unreachable_placement = true;
-        throw std::runtime_error("Placement IK or release space unavailable; choose another position before picking");
+        throw std::runtime_error("Pre-grasp placement IK failed; choose another position before picking");
+      }
+      precheck = Action::Result::PRECHECK_PLACE_IK;
+      const auto release = motion_->canReleaseAt(put_tool, gripperJoints(closed_width),
+        gripperJoints(release_width), scene_->placementScene(placed_object));
+      if (release != Motion::ReleaseCheck::OK) {
+        if (release == Motion::ReleaseCheck::BLOCKED) {
+          precheck = Action::Result::PRECHECK_RELEASE_SPACE;
+          logTarget("Placement release space", put_tool);
+          result->unreachable_placement = true;
+          throw std::runtime_error("Gripper release space unavailable; choose another position before picking");
+        }
+        logTarget("Placement IK", put_tool);
+        result->unreachable_placement = true;
+        throw std::runtime_error("Placement IK failed; choose another position before picking");
       }
       RCLCPP_INFO(node_->get_logger(), "Placement release checked: width=%.4f m", release_width);
+      // 两项预检都通过；此后的失败与放置预检无关。
+      precheck = Action::Result::PRECHECK_NONE;
       step("Move to pre-grasp", [&]() { return move(pre_pick, false); });
       step("Descend to grasp", [&]() { return move(pick, true); });
       step("Close gripper", [&]() {
@@ -385,8 +453,15 @@ private:
       step("Release object", [&]() {
         if (!grip(release_width)) {return false;}
         gripper_open = true;  // 足够释放当前物体即可，不要求全开。
-        scene_->release();
         holding_ = false;
+        // 物理负载已结束；此后若场景解除附着失败，只剩 MoveIt 失步，不该重走放置路径。
+        *recovery_ = RecoveryTarget{put, pre_place, release_width, true};
+        try {
+          scene_->release();
+        } catch (const std::exception & error) {
+          throw std::runtime_error(
+            "Gripper opened but MoveIt attachment release failed: " + std::string(error.what()));
+        }
         result->released = true;
         return true;
       });
@@ -397,14 +472,19 @@ private:
       result->message = error.what();
       RCLCPP_WARN(node_->get_logger(), "%s", error.what());
     }
+    bool touch_restored = true;
     try {
       scene_->restoreTouch();
-      result->ready_for_next_pick = !holding_ && gripper_open;
     } catch (const std::exception & error) {
+      touch_restored = false;
       result->success = false;
       result->message += "; restoring collision checks failed: " + std::string(error.what());
     }
     result->holding = holding_ || scene_->holding();
+    result->ready_for_next_pick = touch_restored && !result->holding && gripper_open;
+    result->precheck_failure = precheck;
+    // 恢复目标随持物状态存亡：空载不留可用目标，带载保留给恢复服务；须在交还 busy_ 前定稿。
+    if (!result->holding) {recovery_.reset();}
     busy_ = false;  // 在结果可见前交还执行权，避免下一请求撞上旧 busy。
     if (rclcpp::ok()) {
       if (handle->is_canceling()) {
@@ -435,13 +515,19 @@ private:
   std::atomic<bool> busy_{false};
   std::atomic<bool> holding_{false};
   std::string frame_, tool_frame_;
-  tf2::Vector3 tool_to_tcp_, offset_, recovery_tcp_, recovery_above_;
-  bool recovery_available_ = false;
+  tf2::Vector3 tool_to_tcp_, offset_;
   tf2::Quaternion tool_rotation_;
   std::vector<double> signs_;
   double approach_, lift_, transport_z_, clearance_, retreat_;
   double open_width_, grasp_width_, compression_, release_margin_, max_age_, tf_timeout_;
-  double recovery_release_width_ = 0;
+  struct RecoveryTarget
+  {
+    tf2::Vector3 tcp, above;
+    double release_width;
+    bool scene_only = false;  // 夹爪已张开，只剩 MoveIt 附着待清理
+  };
+  // 与恢复服务线程共享：只在持有 busy_ 时读写；随持物状态存亡，确认释放后清除。
+  std::optional<RecoveryTarget> recovery_;
 };
 
 int main(int argc, char ** argv)

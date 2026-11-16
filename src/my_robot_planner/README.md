@@ -21,12 +21,15 @@ source install/setup.bash
 | `idle_timeout` | batch 空闲秒数；0 不自动结束；断流、关联歧义、冷却不算健康空闲 |
 | `retry_policy: priority / immediate / disabled` | 按当前策略重选 / 优先重试失败目标 / 不自动重试 |
 | `max_attempts` | 每个已关联物体的总尝试次数，包含首次；被执行器拒绝不计数 |
+| `max_candidate_attempts` | 单个放置候选被预检拒绝后的重试上限，默认 2 |
+| `max_candidate_reevaluations` | 场景变化后单个候选最多复活次数，默认 1；0 表示不重评 |
 | `retry_cooldown` | 失败后再次参与选择前的等待秒数，默认 0 |
 | `on_attempts_exhausted: continue / stop` | 默认保留失败记录并继续其他目标；全部处理完仍有未解决尝试则结果为失败 |
 | `workspace_min / workspace_max` | 可选 base_link 下 xyz 边界；两者留空不额外限制，不代表可达保证 |
 | `classes.<id>.place_region` | `[xmin, ymin, xmax, ymax, z]`，放置区域与支撑高度；容量不依赖场景物体数量 |
 | `placement_step` | 区域内 x/y 间距；以 `classes.<id>.place_position` 为原点生成候选，优先使用原点附近空位 |
 | `classes.<id>.place_slots` | 可选手工扁平 xyz 三元组，显式设置时优先；未设置 region 时兼容旧单点 |
+| `place_regions.<id>` | 绝对区域 `[xmin, ymin, xmax, ymax, z]`；按 `placement_step` 生成候选，同类多物体依次填格；不受 X/Y/Z 模式影响 |
 | `slot_tolerance` / `height_tolerance` | 水平距离 / 高度差分别核验，默认 12 mm / 6 mm；占位和防止重复抓取使用同一判据 |
 | `slot_clearance` | 为目标尺寸之外预留的放置净空；实际路径继续由 MoveIt 检查 |
 | `on_slots_full: wait / finish` | 默认等待空位，finish 在 batch 空闲结束时报告未完成 |
@@ -39,13 +42,13 @@ source install/setup.bash
 
 ## 逐轴相对 / 绝对放置
 
-`place_position_modes` 按 X/Y/Z 指定 relative/absolute，`place_positions` 按类别 ID 配置中心/偏移。命令行 > 总 YAML > Planner YAML；显式规则整体替换低优先级规则，包括空映射。未定义 ID 被忽略，缺少/无效规则的类别在抓取前跳过，不从区域/其他类别兜底。只有所有层均未提供显式规则时才使用 `classes.<id>.place_position/place_region/place_slots`，缺少这些配置也不发起抓取。
+`place_position_modes` 按 X/Y/Z 指定 relative/absolute，`place_positions` 按类别 ID 配置中心/偏移。命令行 > 总 YAML > Planner YAML；显式规则整体替换低优先级规则，包括空映射。`place_positions` 与 `place_regions` 属于同一规则集：更高层只要提供任一者，就整体替换低层的两类规则；同一层内同一类别同时配置点与区域会在启动时报错。未定义 ID 被忽略，缺少/无效规则的类别在抓取前跳过，不从区域/其他类别兜底。只有所有层均未提供显式规则时才使用 `classes.<id>.place_position/place_region/place_slots`，缺少这些配置也不发起抓取。
 
 Planner 与 CV/depth 读取同一类别表；内部类别容器支持非连续编号，数量不受类别数限制。可靠的未选中/暂不抓取物体仍参与避障。放置核验和视觉 ID 别名关联要求类别一致；预留记录保存物体的包围尺寸，放置净空使用双方尺寸与朝向计算。
 
 每个目标首次派发前在 `reference_frame` 中计算并冻结绝对中心；重试只刷新抓取位姿，新 SortObjects 任务重新建立基准。核验后记录目标位置，视觉 ID 改变时关联同一记录，防止每一帧继续平移。未确认释放位置仍保留预留；已关联物体确实移开后可以再次处理到同一冻结目标。该行为不解决同外观物体任意交叉/大幅移动下的身份歧义。
 
-同色多个物体应用各自初始中心；不会在本轮自动聚集。若多个 absolute 目标重合或目标被其他物体占用，等待可用空间或按 `on_slots_full` 结束，不强行重叠。
+同色多个物体应用各自初始中心；相对点规则不会把它们聚集。需要把同类多物体放进一个区域时使用 `place_regions.<id>`：区域内按 `placement_step` 生成候选并按半径升序尝试，区域坐标始终为绝对。`place_positions` 与 `place_regions` 可在同一任务用于不同类别，但同一类别同时配置会在启动时报错。若多个绝对目标重合或目标被其他物体占用，等待可用空间或按 `on_slots_full` 结束，不强行重叠。
 
 `./script/pick_three_colors.sh --dry-run` 仅显示最终有效规则；相对值没有实时观测时不猜绝对坐标。最终绝对目标在 Planner 日志 `Frozen placement` 中查看，Z 为物体中心而非桌面/TCP。详细示例见 [脚本说明](../../script/README.md#放置坐标规则与优先级)。
 
@@ -68,7 +71,7 @@ Planner 与 CV/depth 读取同一类别表；内部类别容器支持非连续�
 ./script/pick_three_colors.sh
 ```
 
-planner 不读取场景里的数量。未配置新放置规则时，在各类别 `place_region` 中按统一 `placement_step` 生成候选，按当前观测和预留记录寻找空位；可以整体移动或扩大区域，不用为每个物体新增一个放置坐标。区域范围、可见性、可达性和夹爪净空仍由实际工作台决定，物理空间不够时按 `on_slots_full` 等待或结束。执行器在抓取前检查放置位及其上方的 IK 可达性；不可达候选在本任务内暂不使用，planner 换位置或先处理其他目标，不消耗物体抓取尝试次数。IK 检查不替代后续路径和碰撞检查。
+planner 不读取场景里的数量。未配置新放置规则时，在各类别 `place_region` 中按统一 `placement_step` 生成候选，按当前观测和预留记录寻找空位；可以整体移动或扩大区域，不用为每个物体新增一个放置坐标。区域范围、可见性、可达性和夹爪净空仍由实际工作台决定，物理空间不够时按 `on_slots_full` 等待或结束。执行器在抓取前检查放置位及其上方的 IK 可达性；被预检拒绝的候选按 `max_candidate_attempts` 重试后跳过，场景变化时每个候选最多复活 `max_candidate_reevaluations` 次，不消耗物体抓取尝试次数。IK 检查不替代后续路径和碰撞检查。
 
 ## 验证入口
 

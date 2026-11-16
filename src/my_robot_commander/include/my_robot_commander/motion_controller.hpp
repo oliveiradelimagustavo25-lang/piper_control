@@ -18,6 +18,9 @@ namespace my_robot_commander
 class MotionController
 {
 public:
+  // canReleaseAt 的区分结果：IK 未求出与松爪空间受阻需要不同的候选策略。
+  enum class ReleaseCheck { OK, IK_FAILED, BLOCKED };
+
   struct Options
   {
     std::string arm_group = "arm";
@@ -30,6 +33,7 @@ public:
     double acceleration_scaling = 0.2;
     double planning_time = 5.0;
     double cartesian_step = 0.005;  // m，直线路径插值步长。
+    double ik_timeout = 0.2;        // s，单次 IK 求解预算；不代表物理可达边界。
   };
 
   explicit MotionController(const rclcpp::Node::SharedPtr & node);
@@ -41,7 +45,7 @@ public:
 
   bool canReachPose(const geometry_msgs::msg::PoseStamped & pose);  // IK 粗查，不保证路径可行。
   // 在场景快照中求放置位 IK，并检查夹爪从夹持到释放的采样状态；不执行运动。
-  bool canReleaseAt(const geometry_msgs::msg::PoseStamped & pose,
+  ReleaseCheck canReleaseAt(const geometry_msgs::msg::PoseStamped & pose,
     const std::vector<double> & closed, const std::vector<double> & released,
     const moveit_msgs::msg::PlanningScene & scene);
   bool moveToNamedTarget(const std::string & name);

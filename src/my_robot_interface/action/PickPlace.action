@@ -19,8 +19,16 @@ bool success
 string message
 bool holding                       # 执行器仍保留负载；不能直接开始下一抓
 bool released                      # 已在目标位置执行释放，不代表物理放置已核验
-bool unreachable_placement         # 抓取前发现放置位 IK 不可达，可换位置，不计物体抓取失败
+bool unreachable_placement         # 抓取前发现放置位不可用，可换位置，不计物体抓取失败
 bool ready_for_next_pick            # 已空载、夹爪张开且碰撞许可恢复
+
+# unreachable_placement 为真时的预检失败阶段；前提错误时也不计抓取失败。
+uint8 PRECHECK_NONE=0              # 预检通过或失败与放置预检无关
+uint8 PRECHECK_PRE_GRASP_IK=1      # 预放置姿态本次未求出 IK 解
+uint8 PRECHECK_PLACE_IK=2          # 放置姿态本次未求出 IK 解
+uint8 PRECHECK_RELEASE_SPACE=3     # 求出 IK，但松爪采样发生碰撞或越界
+uint8 PRECHECK_PRECONDITION=4      # 观测、尺寸、朝向等前提错误，等待条件恢复
+uint8 precheck_failure
 ---
 # Feedback：只报告主要阶段，完成或失败通过 Result 返回。
 uint8 PREPARING=0     # 检查目标、准备规划场景
