@@ -49,6 +49,15 @@ ament_target_dependencies(depth_localizer
 target_include_directories(depth_localizer PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(depth_localizer ${OpenCV_LIBS} object_catalog)
 
+# GraspNet 候选发布：消费观测链，spawn tools/graspnet/scripts/predict.py（conda 环境）。
+# 不链接任何 graspnet 库（进程边界），因此无需 BUILD 开关。
+add_executable(grasp_candidate_publisher src/grasp_candidate_publisher.cpp)
+target_compile_features(grasp_candidate_publisher PRIVATE cxx_std_17)
+ament_target_dependencies(grasp_candidate_publisher
+  rclcpp sensor_msgs geometry_msgs my_robot_interface cv_bridge tf2 tf2_ros tf2_geometry_msgs)
+target_include_directories(grasp_candidate_publisher PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(grasp_candidate_publisher ${OpenCV_LIBS})
+
 # The normal CV build has no dependency on the external YOLO SDK.
 option(BUILD_YOLO "Build the ROS adapter for the installed yolo_tools SDK" OFF)
 if(BUILD_YOLO)
@@ -65,7 +74,7 @@ install(DIRECTORY include/ DESTINATION include)
 install(TARGETS object_catalog EXPORT export_object_catalog)
 ament_export_targets(export_object_catalog)
 ament_export_dependencies(rclcpp ament_index_cpp yaml-cpp)
-install(TARGETS color_detector aruco_detector depth_localizer
+install(TARGETS color_detector aruco_detector depth_localizer grasp_candidate_publisher
   DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
 

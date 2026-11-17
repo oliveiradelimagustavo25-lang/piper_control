@@ -13,6 +13,7 @@
 #include <my_robot_interface/action/pick_place.hpp>
 #include <my_robot_interface/action/sort_objects.hpp>
 #include <my_robot_interface/msg/detected_object_array.hpp>
+#include <my_robot_interface/msg/grasp_candidate.hpp>
 #include <my_robot_perception/object_catalog.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -31,6 +32,7 @@ class TaskPlanner : public rclcpp::Node
   using Named = my_robot_interface::action::MoveToNamed;
   using Object = my_robot_interface::msg::DetectedObject;
   using Objects = my_robot_interface::msg::DetectedObjectArray;
+  using Candidate = my_robot_interface::msg::GraspCandidate;
   using Trigger = std_srvs::srv::Trigger;
   using SortHandle = rclcpp_action::ServerGoalHandle<Sort>;
   using PickHandle = rclcpp_action::ClientGoalHandle<Pick>;
@@ -50,6 +52,9 @@ class TaskPlanner : public rclcpp::Node
   struct Verification {Object source; tf2::Vector3 target; Slot slot;};
   struct PlacementCheck {const Object * destination = nullptr; bool at_source = false, reliable = false;};
   struct Reservation {tf2::Vector3 goal, extent;};
+  // 每个物体只保留最新一条候选：旧候选被覆盖丢弃，不做历史回查。
+  // center 是候选到达时该物体的观测中心，用于判断物体是否已被移动。
+  struct CachedCandidate {Candidate msg; rclcpp::Time received; tf2::Vector3 center; bool has_center = false;};
 
 public:
   TaskPlanner() : Node("task_planner"), tf_buffer_(get_clock()), tf_listener_(tf_buffer_)
@@ -87,6 +92,11 @@ public:
     height_tolerance_ = declare_parameter<double>("height_tolerance", 0.006);
     slot_clearance_ = declare_parameter<double>("slot_clearance", 0.025);
     max_age_ = declare_parameter<double>("max_observation_age", 2.0);
+    // 候选新鲜度上限必须容得下推理节拍（节流 5 s + 进程往返约 4.4 s，观测时戳天然滞后
+    // 4.4–9.4 s），否则候选会周期性被当作过期。不另做健康检查：
+    // 候选过期或缺席即等于传统链路，降级由数据的缺席产生。
+    candidate_max_age_ = declare_parameter<double>("grasp_candidate_max_age", 20.0);
+    candidate_max_drift_ = declare_parameter<double>("grasp_candidate_max_drift", 0.02);
     timeout_ = declare_parameter<double>("observation_timeout", 5.0);
     action_timeout_ = declare_parameter<double>("action_timeout", 180.0);
     recovery_timeout_ = declare_parameter<double>("recovery_timeout", 90.0);
@@ -184,12 +194,40 @@ public:
     {
       if (!std::isfinite(value) || value <= 0) {throw std::invalid_argument("Invalid timeout/tolerance");}
     }
+    if (!std::isfinite(candidate_max_age_) || candidate_max_age_ <= 0) {
+      throw std::invalid_argument("grasp_candidate_max_age must be positive");
+    }
+    if (!std::isfinite(candidate_max_drift_) || candidate_max_drift_ < 0) {
+      throw std::invalid_argument("grasp_candidate_max_drift must be non-negative");
+    }
     for (const double value : {idle_timeout_, cooldown_, settle_time_, slot_clearance_}) {
       if (!std::isfinite(value) || value < 0) {throw std::invalid_argument("Invalid wait/clearance");}
     }
     subscription_ = create_subscription<Objects>(
       declare_parameter<std::string>("objects_topic", "/perception/objects"), rclcpp::SensorDataQoS(),
       [this](Objects::ConstSharedPtr objects) {observations_ = objects; last_received_ = now(); ++sequence_;});
+    // 可选通道：没有发布者或数据过期时缓存为空，派发自动退回传统抓取。
+    candidates_subscription_ = create_subscription<Candidate>(
+      declare_parameter<std::string>("grasp_candidates_topic", "/grasp/candidates"), 10,
+      [this](Candidate::ConstSharedPtr candidate) {
+        if (candidate->object_id.empty()) {return;}
+        auto & entry = candidates_[candidate->object_id];
+        if (entry.received.nanoseconds() != 0 &&
+          rclcpp::Time(candidate->header.stamp) < rclcpp::Time(entry.msg.header.stamp))
+        {// 乱序到达的旧候选不得覆盖较新的那条。
+          return;
+        }
+        entry.msg = *candidate; entry.received = now();
+        // 记下候选到达时该物体的观测中心：派发时用它判断物体是否已被移动。
+        entry.has_center = false;
+        if (observations_) {
+          for (const auto & object : observations_->objects) {
+            if (object.object_id == candidate->object_id) {
+              entry.center = position(object); entry.has_center = true; break;
+            }
+          }
+        }
+      });
     pick_client_ = rclcpp_action::create_client<Pick>(this,
       declare_parameter<std::string>("pick_place_action", "/manipulation/pick_place"));
     named_client_ = rclcpp_action::create_client<Named>(this,
@@ -819,6 +857,23 @@ private:
       return da != db ? da < db : a.object_id < b.object_id;
     });
   }
+  // 新鲜候选：时戳在阈值内、坐标系有效且物体自候选到达后未被移动，否则当作无候选。
+  // 物体位移判据取代了单纯的时戳代理：物体被推开后就不再抓它的旧位置。
+  // 不做模型健康检查、不重试推理：降级是数据的缺席，不是代码的分支。
+  const Candidate * freshCandidate(const Object & object)
+  {
+    const auto it = candidates_.find(object.object_id);
+    if (it == candidates_.end()) {return nullptr;}
+    const auto & entry = it->second;
+    if (entry.msg.tcp_pose.header.frame_id.empty()) {return nullptr;}
+    const double age = (now() - rclcpp::Time(entry.msg.header.stamp)).seconds();
+    // 时钟回跳或候选盖在未来时戳上：age 为负不可信，不当作新鲜。
+    if (!std::isfinite(age) || age < 0.0 || age > candidate_max_age_) {return nullptr;}
+    if (entry.has_center && (position(object) - entry.center).length() > candidate_max_drift_) {
+      return nullptr;
+    }
+    return &entry.msg;
+  }
   void dispatch(const Object & object, size_t slot)
   {
     active_object_ = object;
@@ -844,10 +899,27 @@ private:
     const auto p = active_destination_;
     goal.place_pose.pose.position.x = p.x(); goal.place_pose.pose.position.y = p.y();
     goal.place_pose.pose.position.z = p.z(); goal.place_pose.pose.orientation = object.pose.orientation;
+    // 候选只做查表透传：planner 不解释姿态，也不向模型提问。
+    const auto * candidate = freshCandidate(object);
+    if (candidate) {
+      goal.grasp_pose = candidate->tcp_pose;
+      goal.grasp_pose.header.frame_id = frame_;
+      goal.grasp_width = candidate->width;
+      goal.grasp_source = "graspnet";
+    }
     feedback(object.object_id);
     RCLCPP_INFO(get_logger(), "Pick %s class=%u (%.4f, %.4f, %.4f) -> slot %zu (%.4f, %.4f, %.4f)",
       object.object_id.c_str(), object.class_id, object.pose.position.x, object.pose.position.y, object.pose.position.z,
       slot, p.x(), p.y(), p.z());
+    if (candidate) {
+      const auto * pose = &candidate->tcp_pose.pose;
+      RCLCPP_INFO(get_logger(), "Grasp candidate for %s: tcp=(%.4f, %.4f, %.4f) width=%.3f age=%.2fs",
+        object.object_id.c_str(), pose->position.x, pose->position.y, pose->position.z,
+        candidate->width, (now() - rclcpp::Time(candidate->header.stamp)).seconds());
+    } else {
+      RCLCPP_INFO(get_logger(), "No fresh grasp candidate for %s; using traditional descent",
+        object.object_id.c_str());
+    }
     phase_ = Phase::SENDING;
     idle_ = cancel_sent_ = false;
     action_since_ = Clock::now();
@@ -1013,6 +1085,7 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Subscription<Objects>::SharedPtr subscription_;
+  rclcpp::Subscription<Candidate>::SharedPtr candidates_subscription_;
   rclcpp_action::Client<Pick>::SharedPtr pick_client_;
   rclcpp_action::Client<Named>::SharedPtr named_client_;
   rclcpp::Client<Trigger>::SharedPtr recovery_client_;
@@ -1020,6 +1093,7 @@ private:
   rclcpp::TimerBase::SharedPtr timer_;
   Objects::ConstSharedPtr observations_;
   std::map<std::string, Verification> pending_verifications_;
+  std::map<std::string, CachedCandidate> candidates_;
   std::shared_ptr<SortHandle> task_;
   PickHandle::SharedPtr active_pick_;
   NamedHandle::SharedPtr active_named_;
@@ -1054,6 +1128,8 @@ private:
   Clock::time_point action_since_, next_try_, recovery_since_;
   double max_age_, timeout_, action_timeout_, recovery_timeout_, settle_time_, idle_timeout_;
   double cooldown_, verify_timeout_, slot_tolerance_, height_tolerance_, slot_clearance_;
+  double candidate_max_age_;
+  double candidate_max_drift_;
   int max_attempts_, max_candidate_attempts_, max_candidate_reevaluations_, max_objects_;
   int64_t recovery_request_id_ = 0;
   uint64_t sequence_ = 0, processed_sequence_ = 0;

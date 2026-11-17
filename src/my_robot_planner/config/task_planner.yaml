@@ -33,6 +33,14 @@ task_planner:
     action_timeout: 180.0          # s，超时请求取消，等待执行器返回状态
     recovery_timeout: 90.0         # s，不能确认恢复时结束，保留负载状态
 
+    # 候选通道（可选）：/grasp/candidates 断流或过期时，派发自动退回传统固定向下抓取。
+    # max_age 必须大于推理节拍（节流 5 s + 进程往返约 4.4 s）；过紧会让候选周期性
+    # 被视为过期。
+    # max_drift 是"物体自候选到达后允许的位移"，超出即弃用候选（物体已被推开）。
+    grasp_candidates_topic: /grasp/candidates
+    grasp_candidate_max_age: 20.0
+    grasp_candidate_max_drift: 0.02
+
     # 空列表不限制区域。可填写 base_link 下的 xyz 下界/上界；放置点可在区内。
     workspace_min: []
     workspace_max: []

@@ -103,3 +103,11 @@ python3 test/probes/check_planning_scene.py --recovery
 `check_placement_config.py` 验证放置规则校验、实际 launch 参数优先级和脚本 dry-run。调度探针增加逐轴混合、负绝对 Z、冻结目标重试、抓空、目标 ID 改变、零偏移和占用等待等用例；完整入口探针同时支持区域和相对/绝对规则，从运行参数推导目标。
 
 类别升级回归增加未定义 ID、缺失放置规则、同色不同类核验、不同尺寸预留及不完整感知汇总；场景生成检查请求/生成/跳过报告，并检查 CLI 类别表覆盖和圆柱几何尺寸（只验证生成，不证明圆柱识别抓取）。
+
+## GraspNet 离线评估回归
+
+`python3 test/probes/check_graspnet_eval.py` 在系统 Python 下检查宽度过滤前后的指标、
+完整旋转保存、空候选、错误分母和按 item ID 固定采样；不加载模型，不需要 ROS/GPU。
+实际模型评估使用 `python3 test/graspnet_eval.py`，依赖、模型和输入快照准备见
+[GraspNet 工具说明](../tools/graspnet/README.md)。v2 报告将 NMS 后和宽度过滤后分开，
+不能将旧报告的去重/过滤指标与 v2 直接混用。

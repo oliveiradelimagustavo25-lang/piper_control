@@ -1,0 +1,10 @@
+# 推理环境为 conda `graspnet`；版本为 2026-11-17 实测记录，非上游原始约束。
+# 仅作版本记录，复用已有环境；不是从零安装或重新编译扩展的清单。
+# 该环境不导入 rclpy、不解析 YAML（未安装 PyYAML）；跨环境数据走 JSON + 子进程。
+torch==2.14.1+cu130
+numpy==2.2.6
+graspnetAPI==1.2.11
+scipy==1.15.3
+pillow==12.3.0
+open3d==0.20.0
+# pointnet2._ext / knn_pytorch use the dependencies already installed in conda graspnet.
