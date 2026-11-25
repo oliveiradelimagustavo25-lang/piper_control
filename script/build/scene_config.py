@@ -104,17 +104,32 @@ def generate(scenes, output, world_dir, class_config):
                 raise ValueError('invalid simulation mass/rgba')
             report['generated'][str(cid)] = 0
             for index, position in enumerate(positions, 1):
-                if (not isinstance(position, list) or len(position) != 3 or
+                # 每个位置支持 [x, y, z] 或 [x, y, z, yaw_deg]：绕自身竖直轴偏转物体。
+                # 只支持 yaw：立方体绕竖直轴旋转仍是稳态，且不会被掀翻，归因干净；
+                # pitch/roll 会让立方体倒下，并使“顶面 − 标称半高”的中心估计失效。
+                if (not isinstance(position, list) or len(position) not in (3, 4) or
                         any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in position)):
                     report['skipped'].append({'class_id': cid, 'instance': index, 'reason': 'invalid position'})
                     continue
                 name = f'class_{cid}_{index}'
-                body = ET.SubElement(objects, 'body', name=name, pos=' '.join(map(str, position)))
+                attributes = {'name': name, 'pos': ' '.join(map(str, position[:3]))}
+                yaw = math.radians(float(position[3])) if len(position) == 4 else 0.0
+                if yaw:
+                    # MuJoCo quat 顺序为 w x y z；绕 z 轴单轴旋转在其他约定下结果相同。
+                    attributes['quat'] = ' '.join(map(
+                        lambda v: f'{v:.9f}',
+                        (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))))
+                body = ET.SubElement(objects, 'body', **attributes)
                 ET.SubElement(body, 'freejoint')
+                # condim=4 启用扭转摩擦约束（默认 3 只有法向+切向）：方块被夹持后
+                # 绕 yaw 打转的根源是接触无抗扭能力。接触 condim 取两 geom 的较大值，
+                # 故只需在物体侧设置；扭转摩擦系数沿用全局默认 friction 第二分量。
                 ET.SubElement(body, 'geom', type=shape, size=' '.join(map(str, size)),
-                              mass=str(mass), rgba=' '.join(map(str, rgba)))
+                              mass=str(mass), rgba=' '.join(map(str, rgba)), condim='4')
                 report['generated'][str(cid)] += 1
                 report['bodies'][name] = cid
+                if yaw:
+                    report['bodies'][f'{name}:yaw_deg'] = round(float(position[3]), 3)
         except (KeyError, TypeError, ValueError) as error:
             report['skipped'].append({'class_id': cid, 'reason': str(error)})
     for skipped in report['skipped']:

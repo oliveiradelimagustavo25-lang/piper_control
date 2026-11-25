@@ -20,4 +20,5 @@ docs/
 /tools/*/models/artifacts/
 /tools/*/models/*.pt
 
-.qoder
+AGENTS.md
+.qoder/

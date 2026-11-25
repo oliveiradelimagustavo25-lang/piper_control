@@ -29,6 +29,37 @@ Visualization Manager:
       Show Arrows: true
       Show Axes: true
       Show Names: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Object centres
+      Enabled: true
+      Topic:
+        Value: /perception/object_markers
+    - Class: rviz_default_plugins/PoseArray
+      Name: GraspNet reference poses (+X opening, +Z approach)
+      Enabled: true
+      Topic:
+        Value: /grasp/candidate_poses
+      Shape: Axes
+      Axes Length: 0.025
+      Axes Radius: 0.001
+    - Class: rviz_default_plugins/Pose
+      Name: Selected TCP at grasp
+      Enabled: true
+      Topic:
+        Value: /grasp/selected_tcp
+        Durability Policy: Transient Local
+      Shape: Axes
+      Axes Length: 0.038
+      Axes Radius: 0.001
+    - Class: rviz_default_plugins/Pose
+      Name: Measured TCP before closing
+      Enabled: true
+      Topic:
+        Value: /grasp/measured_tcp
+        Durability Policy: Transient Local
+      Shape: Axes
+      Axes Length: 0.048
+      Axes Radius: 0.001
     - Class: moveit_rviz_plugin/MotionPlanning
       Name: MotionPlanning
       Planned Path:

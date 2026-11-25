@@ -14,6 +14,10 @@ arm_controller:
     command_interfaces: [position]
     state_interfaces: [position, velocity]
     allow_nonzero_velocity_at_trajectory_end: false
+    # 2026-11-18 实测对比（controller_state 记录，31 次段末）：none 是零阶保持，
+    # 指令呈台阶状，跟随误差翻转次数比 splines 高 5–27 倍、最大误差高 1.5–6 倍。
+    # 因此维持 splines；起停顿挫的根因不在插值方式。
+    interpolation_method: splines
     constraints:
       goal_time: 3.0
       joint1: {goal: 0.08}

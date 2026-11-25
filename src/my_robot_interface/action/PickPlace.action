@@ -14,15 +14,14 @@ geometry_msgs/Vector3 object_dimensions
 # 固定放置坐标可用零时间戳，坐标系仍需明确指定。
 geometry_msgs/PoseStamped place_pose
 
-# 可选：抓取网络候选，数据驱动降级的唯一开关。
-# grasp_pose.header.frame_id 为空 = 本次没有候选，执行器走传统深度链路（固定向下）。
-# 有候选时：grasp_pose 为夹持中心位姿（base_link），姿态即抓取坐标系：
+# 可选：抓取网络候选列表，数据驱动降级的唯一开关。
+# 空数组 = 本次没有候选，执行器走传统深度链路（固定向下）。
+# 顺序即优先级（模型 score 降序）：执行器按序尝试，取第一个同时通过
+# 开口粗筛、倾角/偏心准入、且放置预位姿 IK 可解的候选；全部不合格才回退传统。
+# 每条候选的 tcp_pose 为夹持中心位姿（base_link），姿态即抓取坐标系：
 #   +z = 接近轴（手腕指向指尖），+x = 开合轴，+y 由右手系确定；
-#   header.stamp 为候选对应观测帧的时间，仅用于记录。
-# grasp_width 为候选开口，m；作为开合指令与限位过滤输入，不等于真实物体宽度。
-geometry_msgs/PoseStamped grasp_pose
-float64 grasp_width
-string grasp_source                # "" = 无候选；"graspnet" = 候选来自抓取网络
+#   header.stamp 为候选对应观测帧的时间，width 为候选开口（不等于真实物体宽度）。
+my_robot_interface/GraspCandidate[] grasp_candidates
 ---
 # Result：执行结果；最终是否进入颜色分拣区域由任务节点另行视觉验证。
 bool success

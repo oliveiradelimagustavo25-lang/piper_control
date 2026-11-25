@@ -3,6 +3,7 @@ import argparse
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import shlex
 import signal
 import time
 
@@ -17,6 +18,8 @@ NODE_PATHS = (
     '/lib/my_robot_perception/color_detector',
     '/lib/my_robot_perception/depth_localizer',
     '/lib/my_robot_perception/yolo_detector',
+    '/lib/my_robot_perception/aruco_detector',
+    '/lib/my_robot_perception/grasp_candidate_publisher',
 )
 LAUNCH_FILES = {'mujoco.launch.py', 'ros2_control.launch.py', 'motion_control.launch.py', 'perception.launch.py'}
 PERCEPTION_LAUNCH_FILES = {
@@ -35,6 +38,48 @@ class Process:
     cwd: Path
     executable: str
     orphan: bool
+    workspace_owned: bool = False
+
+
+def classify(args, cwd, root):
+    """识别实际节点、ROS CLI 包装器和 GraspNet 在线推理链。"""
+    if not args:
+        return None, False
+    executable = Path(args[0])
+    shell = executable.name in {'sh', 'bash', 'dash'}
+    if shell and len(args) == 3 and args[1] == '-c':
+        args = shlex.split(args[2])
+    if args and Path(args[0]).name.startswith('python'):
+        args = args[1:]
+    if not args:
+        return None, False
+    executable = Path(args[0])
+    path = Path(os.path.abspath(cwd / executable))
+    if (path == root / 'tools/graspnet/scripts/predict.py' and
+            all(flag in args[1:] for flag in ('--input', '--out', '--proposals'))):
+        return ('inference_shell' if shell else 'inference'), True
+    if shell:
+        return None, False
+    if executable.name == 'ros2' and len(args) >= 4:
+        operation, package, target = args[1:4]
+        if operation == 'launch' and (
+                (package == 'my_robot_bringup' and target in LAUNCH_FILES)
+                or (package == 'my_robot_perception' and target in PERCEPTION_LAUNCH_FILES)
+                or (package == 'my_robot_planner' and target == 'task_planner.launch.py')
+                or (package == 'my_robot_moveit_pkg' and target == 'moveit_rviz.launch.py')):
+            return 'launch', False
+        if (operation == 'run' and package.startswith('my_robot_') and
+                f'/lib/{package}/{target}' in NODE_PATHS):
+            return 'runner', False
+        return None, False
+    if str(path).endswith(NODE_PATHS):
+        return 'node', path.is_relative_to(root)
+    if str(path).endswith('/lib/rviz2/rviz2'):
+        configs = (Path(os.path.abspath(cwd / name))
+                   for option, name in zip(args, args[1:]) if option == '-d')
+        return 'rviz', any(config.is_relative_to(root) and config.name == 'moveit.rviz'
+                           for config in configs)
+    return None, False
 
 
 def read_process(pid):
@@ -47,37 +92,28 @@ def read_process(pid):
         if fields[0] == 'Z':
             return None
         args = [os.fsdecode(x) for x in (proc / 'cmdline').read_bytes().split(b'\0') if x]
-        if args and Path(args[0]).name.startswith('python'):
-            args = args[1:]
-        if not args:
-            return None
-        executable = args[0]
-        if Path(executable).name == 'ros2' and len(args) >= 4 and args[1] == 'launch':
-            package, launch_file = args[2:4]
-            if ((package == 'my_robot_bringup' and launch_file in LAUNCH_FILES) or
-                    (package == 'my_robot_perception' and launch_file in PERCEPTION_LAUNCH_FILES)):
-                kind = 'launch'
-            else:
-                return None
-        elif executable.endswith(NODE_PATHS):
-            kind = 'node'
-        elif executable.endswith('/lib/rviz2/rviz2'):
-            kind = 'rviz'  # 只随本工作区的孤立 launch 清理，不单独清理 RViz。
-        else:
+        cwd = Path(os.readlink(proc / 'cwd'))
+        kind, owned = classify(args, cwd, ROOT)
+        if kind is None:
             return None
         domain = next((x.split(b'=', 1)[1] for x in (proc / 'environ').read_bytes().split(b'\0')
                        if x.startswith(b'ROS_DOMAIN_ID=')), b'0')
         parent = int(fields[1])
         orphan = parent == 1 or (Path('/proc') / str(parent) / 'comm').read_text().strip() == 'systemd'
         return Process(int(pid), parent, fields[19], kind, int(domain),
-                       Path(os.readlink(proc / 'cwd')), executable, orphan)
+                       cwd, args[0], orphan, owned)
     except (OSError, ValueError, IndexError):
         return None
 
 
+def in_scope(process, root, domain):
+    return process.domain == domain and (process.workspace_owned or process.cwd.is_relative_to(root))
+
+
 def select_targets(processes, root, domain):
-    scoped = {p.pid: p for p in processes if p.domain == domain and p.cwd.is_relative_to(root)}
-    roots = {pid for pid, p in scoped.items() if p.kind == 'launch' and p.orphan}
+    scoped = {p.pid: p for p in processes if in_scope(p, root, domain)}
+    roots = {pid for pid, p in scoped.items()
+             if p.orphan and (p.kind != 'rviz' or p.workspace_owned)}
 
     def managed_by_orphan(pid):
         visited = set()
@@ -88,10 +124,8 @@ def select_targets(processes, root, domain):
             pid = scoped[pid].parent
         return False
 
-    targets = [p for p in scoped.values() if p.pid in roots or
-               (p.kind in ('node', 'rviz') and managed_by_orphan(p.parent)) or
-               (p.kind == 'node' and p.orphan)]
-    leaders = [p for p in targets if p.pid in roots or not managed_by_orphan(p.parent)]
+    targets = [p for p in scoped.values() if managed_by_orphan(p.pid)]
+    leaders = [scoped[pid] for pid in sorted(roots)]
     return sorted(targets, key=lambda p: (p.kind != 'launch', p.pid)), leaders
 
 
@@ -129,15 +163,15 @@ def main():
     targets, leaders = select_targets(processes, ROOT, args.ros_domain_id)
     print(f'工作区: {ROOT}；ROS 域: {args.ros_domain_id}', flush=True)
     if not targets:
-        active = [p for p in processes if p.domain == args.ros_domain_id and p.cwd.is_relative_to(ROOT)]
+        active = [p for p in processes if in_scope(p, ROOT, args.ros_domain_id)]
         print('没有发现符合条件的残留启动链。')
         if active:
             print(f'另有 {len(active)} 个相关进程仍由活动启动进程管理，未清理；请在对应终端正常退出。')
         print('若 node list 仍有记录，可用 ros2 node list --no-daemon 区分发现缓存与其他来源的节点。')
         return 0
     for p in targets:
-        reason = '孤立 launch' if p.kind == 'launch' else '孤立节点' if p.orphan else '孤立 launch 的子进程'
-        print(f'PID={p.pid} PPID={p.parent}：{reason}；{p.executable}', flush=True)
+        reason = '已被 init/systemd 接管' if p.orphan else '残留启动链的子进程'
+        print(f'PID={p.pid} PPID={p.parent} [{p.kind}]：{reason}；{p.executable}', flush=True)
     if args.dry_run:
         print('仅显示结果，没有发送信号。')
         return 0

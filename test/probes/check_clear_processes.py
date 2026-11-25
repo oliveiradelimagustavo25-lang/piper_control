@@ -15,6 +15,35 @@ def process(pid, parent, kind='node', orphan=False, domain=227, cwd=ROOT):
 
 
 class ClearSelectionCheck(unittest.TestCase):
+    def test_graspnet_and_new_standalone_nodes(self):
+        outside = Path('/tmp')
+        installed = ROOT / 'install/lib/my_robot_perception'
+        for name in ('aruco_detector', 'grasp_candidate_publisher'):
+            self.assertEqual(clear.classify([str(installed / name)], outside, ROOT), ('node', True))
+        self.assertEqual(clear.classify(
+            ['/usr/bin/python3', '/opt/ros/humble/bin/ros2', 'run',
+             'my_robot_perception', 'grasp_candidate_publisher'], ROOT, ROOT), ('runner', False))
+        predict = ROOT / 'tools/graspnet/scripts/predict.py'
+        command = f'"/conda/bin/python" "{predict}" --input req.json --out result.json --proposals poses.txt'
+        self.assertEqual(clear.classify(['/bin/sh', '-c', command + ' > predict.log 2>&1'],
+                                        outside, ROOT), ('inference_shell', True))
+        self.assertEqual(clear.classify(['/conda/bin/python', str(predict), '--input', 'offline.json'],
+                                        ROOT, ROOT), (None, False))
+        chain = [process(10, 1, 'runner', True), process(11, 10),
+                 process(12, 11, 'inference_shell'), process(13, 12, 'inference'),
+                 process(14, 12, 'inference', domain=228)]
+        targets, leaders = clear.select_targets(chain, ROOT, 227)
+        self.assertEqual({p.pid for p in targets}, {10, 11, 12, 13})
+        self.assertEqual({p.pid for p in leaders}, {10})
+
+    def test_orphan_rviz_with_workspace_config(self):
+        config = ROOT / 'src/my_robot_moveit_pkg/config/moveit.rviz'
+        kind, owned = clear.classify(['/opt/ros/humble/lib/rviz2/rviz2', '-d', str(config)],
+                                     Path('/tmp'), ROOT)
+        orphan = clear.Process(10, 1, '10', kind, 227, Path('/tmp'), 'rviz2', True, owned)
+        unrelated = process(11, 1, 'rviz', True)
+        self.assertEqual(clear.select_targets([orphan, unrelated], ROOT, 227), ([orphan], [orphan]))
+
     def test_orphan_launch_and_children(self):
         chain=[process(10,1,'launch',True),process(11,10),process(12,10,'rviz')]
         targets,leaders=clear.select_targets(chain,ROOT,227)

@@ -36,19 +36,22 @@ pick_place_executor:
     # 3.8 mm（MJCF 网格实测），所以该值必须大于零，过大会把指尖压进支撑面。
     candidate_depth_offset: 0.005
     # 抓取坐标系（+x 开合轴）→ 工具坐标系（+y 开合轴）的绕 z 旋转；Piper 手指沿 link6 ±Y 滑动。
-    # 若发现夹爪开合方向与物体表面平行/垂直错位，按 90° 步长调整此值排查。
+    # 此值只用于抓取坐标系到末端坐标系的标定，模型候选决定物体的抓取方向。
     candidate_roll_deg: -90.0
     # 候选开口的粗筛倍数（× gripper_open_width）。模型 width 对 30 mm 方块输出 78–88 mm，
     # 按 1.0 卡会拒掉全部候选；该值又不宜置空，否则大物体/桌面的误抓也会被透传。
     candidate_width_limit: 1.5
-    # 姿态准入：接近轴与竖直的夹角上限。路径已沿接近轴退出/进给，不再假设竖直，
-    # 故放到 45°；再大则腕部在低矮抓取点上仍会贴 joint5 限位。
-    candidate_max_tilt_deg: 45.0
+    # 姿态准入：接近轴与竖直的夹角上限。2026-11-18 实测 41° 候选能通过准入但
+    # 放置 IK 失败；34° 倾斜即使位置精确也抓不住贴地方块。收到 25°。
+    candidate_max_tilt_deg: 25.0
     # 偏心准入：候选夹持点与物体观测中心的水平距离上限。当前候选实测落 11–21 mm，
     # 取 20 mm 才能观察到斜抓效果；该值尚未按抓取成功率标定。
     candidate_max_offset: 0.02
     # 隔离实验：true = 只取候选姿态、位置用观测中心。用于区分偏心与姿态，非正式配置。
     candidate_centre_snap: false
+    # 宽度保守估计：视觉不输出物体朝向（depth_localizer 恒发单位四元数），斜放时按名义
+    # 姿态投影会低估宽度，导致释放开口不足、夹爪刮带物体。true = 取面对角线作为下限。
+    grasp_width_worst_case: true
     # 悬停高度受 joint5 限位约束：固定向下姿态下，法兰越高腕部俯仰需求越大。
     # 2026-11-15 离线标定：法兰 0.219 m（旧值组合）在半径约 0.36 m 处 joint5 贴上 1.22 上限，
     # IK 只剩贴边解、KDL 无法收敛，出现 "Pre-grasp placement IK failed"；法兰 0.201 m 在
@@ -60,8 +63,12 @@ pick_place_executor:
 
     # 当前 Piper 两个手指：joint7=q，joint8=-q，开口宽度约为 2*q。
     gripper_open_width: 0.07
-    gripper_grasp_width: 0.03    # 统一标称夹持宽度，m；实际闭合目标再减 compression
-    gripper_compression: 0.002   # 闭合目标 = gripper_grasp_width - 本值，当前为 0.028 m
+    # 2026-11-23：20 g 物体在倾斜夹持下会滑脱（候选抓取 0/4）。法向力 ≈ kp×过盈，
+    # 原闭合目标 0.028 对 30 mm 物体只有 2 mm 过盈（≈1 N/指），动态冲击下裕度不足。
+    # 降到 0.024 → 闭合目标 0.022、过盈 8 mm（≈2 N/指），抗滑裕度约 ×2。
+    # 不提高夹爪 kp：高 kp 会在接触界面引入高频抖动，正是待查的振动源之一。
+    gripper_grasp_width: 0.024   # 统一标称夹持宽度，m；实际闭合目标再减 compression
+    gripper_compression: 0.002   # 闭合目标 = gripper_grasp_width - 本值，当前为 0.022 m
     gripper_release_margin: 0.006 # 释放总开口 = 物体投影宽度/默认夹持宽度的较大值 + 此间隙，上限 open_width
     gripper_joint_signs: [1.0, -1.0]  # 顺序必须对应 gripper 组的变量顺序
 

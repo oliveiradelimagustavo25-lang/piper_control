@@ -15,6 +15,9 @@ task_planner:
     default_class_order: []         # 使用类别表顺序；如 [1, 2, 3] 可筛选并指定类别优先级
     finish_mode: batch              # batch: 健康空闲后结束；watch: 持续等待
     idle_timeout: 3.0               # s，0 不自动结束
+    # 槽位被占或候选持续被预检拒收时的等待上限，超时后按“无可用放置候选”结束。
+    # 没有这个出口时，一次放置核验失败就能永久锁住只有一个槽位的类别。
+    shortage_timeout: 30.0
     max_objects: 0                 # 0 不限；按已核验搬运次数计数
     retry_policy: priority         # priority / immediate / disabled
     max_attempts: 3                # 包含首次；不会因漏检而清零
@@ -25,7 +28,7 @@ task_planner:
     on_slots_full: wait            # wait / finish；不强行重叠放置
     placement_verification: visual # visual / motion（motion 仅确认运动流程）
     verification_timeout: 3.0      # s，回观察位后等待抓后核验
-    slot_tolerance: 0.012          # m，水平距离容差
+    slot_tolerance: 0.015          # m，物体中心到目标中心的水平距离容差
     height_tolerance: 0.006        # m，独立高度容差；高度异常或漏检先重新观察，不盲目重抓
     slot_clearance: 0.010          # m，方块之外的额外净空；运动路径仍由 MoveIt 检查
     max_observation_age: 2.0

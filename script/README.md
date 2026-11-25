@@ -76,9 +76,9 @@ export ROS_DOMAIN_ID=227
 
 `clear.sh` 是入口，进程识别位于 `script/build/clear_processes.py`，只使用 Python 标准库，无需加载 ROS 环境。默认使用当前 `ROS_DOMAIN_ID`，未设置时为域 0。
 
-清理范围同时满足当前用户、工作目录在本工作区内、ROS 域匹配，以及属于已知启动链。识别两种残留：节点直接被 init/用户 systemd 接管；或者 `my_robot_bringup` / `my_robot_perception` 的已知 launch 被接管、它下面的节点仍由这个 launch 管理。后一种情况正是“node list 还有很多节点，但旧 clear 什么都找不到”的原因。
+只清理匹配当前用户、指定 ROS 域和本工作区的已知进程。用工作目录、工作区内的节点可执行文件或明确的配置路径判定归属。进程链被 init 或用户 systemd 接管后，清理脚本会选中该入口及匹配的子进程。
 
-覆盖机器人状态、MuJoCo 控制、spawner、MoveIt、抓放执行器、task_planner，以及 CV、depth、ArUco 和 YOLO 感知节点。RViz 只随选中的孤立 launch 清理，不单独清理。仍受正常活动启动链管理的任务、其他工作区和其他域不处理；可在对应终端正常退出。
+覆盖机器人状态、MuJoCo 控制、spawner、MoveIt、抓放执行器、task_planner、CV、depth、ArUco、YOLO 和 GraspNet 候选发布器。也识别工作区 ROS 节点的 `ros2 run` 包装进程，以及 GraspNet 在线推理的 shell 和 Python 进程。RViz 可以随残留启动链清理，孤立 RViz 需使用本工作区的 `moveit.rviz`。在对应终端正常退出仍在使用的任务。
 
 先只向孤立 launch/独立孤立节点发送一次 SIGINT，等待 10 秒；随后对仍存活的所选进程依次发送 TERM、KILL。每次发送前检查 PID 启动时间、域、目录和可执行文件，降低 PID 复用造成误伤的风险；僵尸进程不算仍运行的节点。最终核验所选 PID 已退出，不停止 ROS daemon。
 

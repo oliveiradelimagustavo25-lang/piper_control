@@ -37,8 +37,15 @@ config/
 
 script/
   pick_three_colors.sh        # 启动仿真、移动到 pose_1 并触发分拣
+  pick_graspnet.sh            # 同上 + GraspNet 候选发布（数据驱动降级）
   clear.sh                    # 清理本工作区已脱离启动进程的 ROS 残留
   README.md
+
+tools/
+  graspnet/                   # GraspNet 推理工具（conda 环境运行，非 ROS 包）
+    scripts/predict.py        # 点云 → 抓取候选
+    models/artifacts/         # 权重（.gitignore 排除，需自行下载）
+    third_party/              # 上游 graspnet-baseline（非商业许可，见下方声明）
 
 test/
   robot_description.py        # 机器人本体查看，可选 RViz
@@ -160,6 +167,36 @@ ros2 action send_goal --feedback /manipulation/move_to_named \
 ```
 
 接口名称可通过 `move_to_named_action` 配置；脚本会读取执行器的实际名称。脚本还会发送 `/sorting/sort_objects` 分拣目标，规划器再按自身配置前往观察位并抓放；使用脚本时无需另行发送重复目标。
+
+## GraspNet 候选抓取（可选）
+
+`./script/pick_graspnet.sh` 默认使用项目第二轮八类别 YOLO 模型，并启动 `grasp_candidate_publisher` 发布抓取姿态和开口宽度。可用 `-- detector:=cv` 切换检测器，或用 `-- yolo_model:=/path/to/model.onnx` 指定模型。RViz 可查看模型参考位姿、选定 TCP 和闭爪前由 TF 测得的 TCP。架构为**数据驱动降级**：
+
+- 候选在线且新鲜（≤20 s、位移≤20 mm）→ 执行器按 score 降序尝试候选，取第一个通过准入（倾角≤25°、偏心≤20 mm、开口粗筛）且放置 IK 可解的变体；
+- 候选缺席、过期或全部不合格 → 自动回退传统深度链路（固定向下抓取），无模式开关、无切换代码。
+
+```bash
+# 默认：top-5 候选、5 s 推理间隔
+./script/pick_graspnet.sh
+
+# 无窗口 + 每物体 3 个候选
+./script/pick_graspnet.sh --headless --top-k 3
+
+# 指定 conda 解释器与 ROS 域
+./script/pick_graspnet.sh --conda-python /path/to/envs/graspnet/bin/python --ros-domain-id 230
+```
+
+前置条件：
+
+| 项 | 说明 |
+| --- | --- |
+| conda 环境 | Python 3.10 + torch（CUDA）+ graspnetAPI；默认路径 `/home/ltt/miniconda3/envs/graspnet/bin/python`，可用 `--conda-python` 或 `$GRASPNET_PYTHON` 覆盖 |
+| 权重 | `tools/graspnet/models/artifacts/checkpoint-rs.tar`（epoch 18，~130 MB，不入库） |
+| GPU | 推理需 CUDA；不可用时脚本警告并自动降级为传统链路 |
+
+候选话题 `/grasp/candidates`（`GraspCandidateArray`，按物体分组）；执行器参数见 [manipulation.yaml](src/my_robot_commander/config/manipulation.yaml) 的 `candidate_*` 段。推理工具独立于 ROS 环境运行（numpy 2.x 与 ROS 的 numpy 1.x 存在 ABI 冲突，跨环境传数据走进程边界）。
+
+> **许可声明**：`tools/graspnet/third_party/graspnet-baseline/` 含上游代码，其 LICENSE 限定“学术或非营利组织非商业研究使用”，**不受本仓库 Apache-2.0 覆盖**。商业使用须自行取得上游授权或替换该目录。
 
 ## 总配置与 YAML 覆盖关系
 

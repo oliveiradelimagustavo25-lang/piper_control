@@ -1,3 +1,6 @@
+#include <iomanip>
+#include <sstream>
+#include <visualization_msgs/msg/marker_array.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -80,6 +83,7 @@ public:
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
     points_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(output_topic, 10);
+    markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("perception/object_markers", 1);
     objects_pub_ = create_publisher<my_robot_interface::msg::DetectedObjectArray>(
       declare_parameter<std::string>("objects_topic", "/perception/objects"), 10);
     info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -377,6 +381,7 @@ private:
             "Incomplete perception: %s", objects.issues.front().c_str());
         }
         objects_pub_->publish(objects);
+        if (markers_pub_->get_subscription_count()) {publishObjectMarkers(objects);}
       }
 
       auto header = labels_msg->header;
@@ -440,6 +445,36 @@ private:
   message_filters::Subscriber<Image> labels_sub_, depth_sub_;
   std::shared_ptr<message_filters::Synchronizer<SyncPolicy>> sync_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr points_pub_;
+  void publishObjectMarkers(const my_robot_interface::msg::DetectedObjectArray & objects)
+  {
+    using Marker = visualization_msgs::msg::Marker;
+    visualization_msgs::msg::MarkerArray markers;
+    for (const auto & object : objects.objects) {
+      Marker marker;
+      marker.header = objects.header;
+      marker.ns = object.object_id;
+      marker.type = Marker::SPHERE;
+      marker.pose.position = object.pose.position;
+      marker.pose.orientation.w = 1.0;
+      marker.color.g = marker.color.b = marker.color.a = 1.0f;
+      marker.scale.x = marker.scale.y = marker.scale.z = 0.006;
+      marker.lifetime = rclcpp::Duration::from_seconds(0.7);
+      markers.markers.push_back(marker);
+      const auto & p = object.pose.position;
+      std::ostringstream label;
+      label << object.object_id << " " << objects.header.frame_id << std::fixed << std::setprecision(3)
+            << " (" << p.x << ", " << p.y << ", " << p.z << ") m";
+      marker.id = 1;
+      marker.type = Marker::TEXT_VIEW_FACING;
+      marker.pose.position.z += 0.025;
+      marker.scale.z = 0.012;
+      marker.text = label.str();
+      markers.markers.push_back(marker);
+    }
+    markers_pub_->publish(markers);
+  }
+
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
   rclcpp::Publisher<my_robot_interface::msg::DetectedObjectArray>::SharedPtr objects_pub_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

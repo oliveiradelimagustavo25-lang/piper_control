@@ -18,6 +18,7 @@ rosidl_generate_interfaces( ${PROJECT_NAME}
     "msg/DetectedObject.msg"
     "msg/DetectedObjectArray.msg"
     "msg/GraspCandidate.msg"
+    "msg/GraspCandidateArray.msg"
     "action/PickPlace.action"
     "action/MoveToNamed.action"
     "action/SortObjects.action"

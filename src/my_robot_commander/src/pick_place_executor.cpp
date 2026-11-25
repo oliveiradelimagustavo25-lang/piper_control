@@ -14,6 +14,7 @@
 #include <my_robot_interface/action/pick_place.hpp>
 #include <my_robot_interface/action/move_to_named.hpp>
 #include <my_robot_interface/msg/detected_object_array.hpp>
+#include <my_robot_interface/msg/grasp_candidate.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -70,6 +71,14 @@ double graspWidth(const geometry_msgs::msg::Pose & object,
          std::abs(relative[1][1]) * dimensions.y +
          std::abs(relative[1][2]) * dimensions.z;
 }
+
+// 长方体绕竖直轴任意偏转时，沿开合轴 u 的最大投影宽度：水平分量取面对角线，
+// 竖直分量取高度。用于视觉未给出物体朝向时的保守估计。
+double worstCaseWidth(const geometry_msgs::msg::Vector3 & dimensions, const tf2::Vector3 & axis)
+{
+  return std::hypot(dimensions.x, dimensions.y) * std::hypot(axis.x(), axis.y()) +
+         dimensions.z * std::abs(axis.z());
+}
 }  // namespace
 
 class PickPlaceExecutor
@@ -80,6 +89,7 @@ class PickPlaceExecutor
   using NamedHandle = rclcpp_action::ServerGoalHandle<NamedAction>;
   using Motion = my_robot_commander::MotionController;
   using Scene = my_robot_commander::PickPlaceScene;
+  using Candidate = my_robot_interface::msg::GraspCandidate;
 
 public:
   explicit PickPlaceExecutor(const rclcpp::Node::SharedPtr & node)
@@ -110,20 +120,24 @@ public:
     // 候选开口的粗筛倍数：模型 width 系统性偏大（对 30 mm 方块输出 78–88 mm），
     // 按同一阈值卡会拒掉全部候选，所以只拦远超出夹爪能力的值。
     candidate_width_limit_ = parameter(node_, "candidate_width_limit", 1.5);
-    // 姿态准入：路径已沿接近轴退出/进给，不再假设竖直，故只拦极端倾斜。
-    candidate_max_tilt_deg_ = parameter(node_, "candidate_max_tilt_deg", 45.0);
+    // 姿态准入：2026-11-18 实测 41° 候选能过准入但放置 IK 失败，34° 倾斜即使
+    // 位置精确也抓不住贴地方块；收到 25°，在“能抓住”与“候选可用率”间取平衡。
+    candidate_max_tilt_deg_ = parameter(node_, "candidate_max_tilt_deg", 25.0);
     // 偏心准入：候选索引点与物体观测中心的水平距离。当前候选实测落 11–21 mm，
     // 阈值取 20 mm 才能观察到斜抓效果；该值尚未按抓取成功率标定。
     candidate_max_offset_ = parameter(node_, "candidate_max_offset", 0.02);
     // 隔离实验开关：只取候选姿态，位置改用观测中心。
     // 用于区分“抓不中是因为参考点偏心”还是“倾斜姿态本身抓不住”，非正式配置。
     candidate_centre_snap_ = parameter(node_, "candidate_centre_snap", false);
+    // 宽度保守估计开关：视觉不输出物体朝向（depth_localizer 恒发单位四元数），
+    // 按名义姿态投影会低估斜放物体的真实宽度，导致释放开口不足、夹爪刮带物体。
+    width_worst_case_ = parameter(node_, "grasp_width_worst_case", true);
     lift_ = parameter(node_, "lift_distance", 0.06);
     transport_z_ = parameter(node_, "transport_height", 0.08);
     clearance_ = parameter(node_, "release_clearance", 0.002);
     retreat_ = parameter(node_, "retreat_distance", 0.04);
     open_width_ = parameter(node_, "gripper_open_width", 0.07);
-    grasp_width_ = parameter(node_, "gripper_grasp_width", 0.03);
+    grasp_width_ = parameter(node_, "gripper_grasp_width", 0.024);
     release_margin_ = parameter(node_, "gripper_release_margin", 0.006);
     compression_ = parameter(node_, "gripper_compression", 0.002);
     signs_ = parameter<std::vector<double>>(node_, "gripper_joint_signs", {1.0, -1.0});
@@ -158,6 +172,12 @@ public:
         std::lock_guard<std::mutex> lock(observations_mutex_);
         observations_ = msg;
       });
+
+    const auto debug_qos = rclcpp::QoS(1).transient_local();
+    target_tcp_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "grasp/selected_tcp", debug_qos);
+    measured_tcp_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
+      "grasp/measured_tcp", debug_qos);
 
     const auto name = parameter<std::string>(node_, "action_name", "/manipulation/pick_place");
     server_ = rclcpp_action::create_server<Action>(node_, name,
@@ -362,7 +382,73 @@ private:
     std::string source;
   };
 
-  GraspTarget resolveGrasp(const Action::Goal & goal, const geometry_msgs::msg::PoseStamped & object)
+  // 单个候选 → 可执行目标。不合格返回 nullopt 并写出原因；合格之前已做完滚转 IK 搜索。
+  std::optional<GraspTarget> candidateTarget(const Candidate & candidate,
+    const geometry_msgs::msg::PoseStamped & object, const tf2::Vector3 & displacement, std::string * reason)
+  {
+    GraspTarget target;
+    target.closed_width = std::max(0.0, grasp_width_ - compression_);
+    target.source = "graspnet";
+    try {
+      if (!std::isfinite(candidate.width) || candidate.width <= 0.0) {
+        throw std::runtime_error("candidate opening is not finite or positive");
+      }
+      // width 是模型的回归值（解码时已含安全放大），与真实开口的关系未标定，
+      // 因此不做硬拒绝，只排除对任何夹爪都无意义的粗大值。
+      if (candidate.width > open_width_ * candidate_width_limit_) {
+        throw std::runtime_error("candidate opening far exceeds gripper capability");
+      }
+      const auto frame = inBase(candidate.tcp_pose);
+      tf2::Quaternion grasp_frame;
+      tf2::fromMsg(frame.pose.orientation, grasp_frame);
+      grasp_frame.normalize();
+      const tf2::Vector3 approach = tf2::quatRotate(grasp_frame, tf2::Vector3(0, 0, 1));
+      // 接近轴偏离竖直的夹角：放置路径只在接近竖直时几何一致。
+      const double tilt = std::acos(std::clamp(-approach.z(), -1.0, 1.0)) * 180.0 / M_PI;
+      if (tilt > candidate_max_tilt_deg_) {
+        throw std::runtime_error("candidate tilt " + std::to_string(tilt) + " deg exceeds limit");
+      }
+      const tf2::Vector3 point(frame.pose.position.x, frame.pose.position.y, frame.pose.position.z);
+      const double offset = std::hypot(point.x() - object.pose.position.x,
+        point.y() - object.pose.position.y);
+      if (offset > candidate_max_offset_) {
+        throw std::runtime_error("candidate lies " + std::to_string(offset) + " m from object centre");
+      }
+      // 参考点落在可见表面上，沿接近轴（手腕→指尖）前进后才是夹持中心；
+      // 方向写反会让夹持点停在表面上方，指尖悬空、抓空。
+      const tf2::Vector3 center(object.pose.position.x, object.pose.position.y, object.pose.position.z);
+      const tf2::Vector3 chosen = candidate_centre_snap_ ? center + offset_ :
+        point + approach * candidate_depth_offset_;
+      // 平行夹爪反向等效；90° 会改变接触方向，应作为不同的模型候选。
+      for (const double degrees : {0.0, 180.0}) {
+        tf2::Quaternion spin;
+        spin.setRPY(0.0, 0.0, degrees * M_PI / 180.0);
+        const auto rotation = (grasp_frame * candidate_roll_ * spin).normalized();
+        if (!placementReachable(rotation, chosen, chosen + displacement)) {continue;}
+        target.rotation = rotation;
+        target.point = chosen;
+        // 候选只能要求更小开口：标称闭合宽度仍是上限，不把预测宽度当作真实物体宽度。
+        target.closed_width = std::min(target.closed_width, candidate.width);
+        RCLCPP_INFO(node_->get_logger(),
+          "Using grasp candidate: tcp (%.4f, %.4f, %.4f) approach (%.3f, %.3f, %.3f) "
+          "roll %.0f deg closed %.4f m reference-to-TCP %.2f mm",
+          target.point.x(), target.point.y(), target.point.z(),
+          approach.x(), approach.y(), approach.z(), degrees, target.closed_width,
+          (chosen - point).length() * 1000.0);
+        return target;
+      }
+      *reason = "no reachable roll variant";
+      return std::nullopt;
+    } catch (const std::exception & error) {
+      *reason = error.what();
+      return std::nullopt;
+    }
+  }
+
+  // 候选按 score 降序到达：取第一个通过全部准入且放置预位姿可解的候选；
+  // 全部不合格才回退传统，并一次性报告拒绝数量与最后一个原因。
+  GraspTarget resolveGrasp(const Action::Goal & goal, const geometry_msgs::msg::PoseStamped & object,
+    const tf2::Vector3 & displacement)
   {
     GraspTarget target;
     target.rotation = tool_rotation_;
@@ -370,86 +456,65 @@ private:
     target.source = "traditional";
     target.point = tf2::Vector3(object.pose.position.x, object.pose.position.y,
       object.pose.position.z) + offset_;
-    if (goal.grasp_pose.header.frame_id.empty()) {return target;}
-    try {
-      const auto candidate = inBase(goal.grasp_pose);
-      if (!std::isfinite(goal.grasp_width) || goal.grasp_width <= 0.0) {
-        throw std::runtime_error("candidate opening is not finite or positive");
-      }
-      // width 是模型的回归值（解码时已含安全放大），与真实开口的关系未标定。
-      // 因此不用它做硬拒绝，只排除对任何夹爪都无意义的粗大值。
-      if (goal.grasp_width > open_width_ * candidate_width_limit_) {
-        throw std::runtime_error("candidate opening far exceeds gripper capability");
-      }
-      tf2::Quaternion grasp_frame;
-      tf2::fromMsg(candidate.pose.orientation, grasp_frame);
-      grasp_frame.normalize();
-      const tf2::Vector3 approach = tf2::quatRotate(grasp_frame, tf2::Vector3(0, 0, 1));
-      // 接近轴偏离竖直的夹角：现有放置路径只会竖直方向几何一致。
-      const double tilt = std::acos(std::clamp(-approach.z(), -1.0, 1.0)) * 180.0 / M_PI;
-      if (tilt > candidate_max_tilt_deg_) {
-        throw std::runtime_error("candidate tilt " + std::to_string(tilt) + " deg exceeds limit");
-      }
-      const tf2::Vector3 point(candidate.pose.position.x, candidate.pose.position.y,
-        candidate.pose.position.z);
-      const double offset = std::hypot(
-        point.x() - object.pose.position.x, point.y() - object.pose.position.y);
-      if (offset > candidate_max_offset_) {
-        throw std::runtime_error("candidate lies " + std::to_string(offset) + " m from object centre");
-      }
-      const auto rotation = (grasp_frame * candidate_roll_).normalized();
-      target.rotation = rotation;
-      // 参考点落在可见表面上，沿接近轴（手腕→指尖）前进后才是夹持中心；
-      // 方向写反会让夹持点停在表面上方，指尖悬空、抓空。
-      if (candidate_centre_snap_) {
-        target.point = tf2::Vector3(object.pose.position.x, object.pose.position.y,
-          object.pose.position.z) + offset_;
-      } else {
-        target.point = point + approach * candidate_depth_offset_;
-      }
-      // 候选只能要求更小开口：标称闭合宽度仍是上限，不把预测宽度当作真实物体宽度。
-      target.closed_width = std::min(target.closed_width, goal.grasp_width);
-      target.source = "graspnet";
-      RCLCPP_INFO(node_->get_logger(),
-        "Using grasp candidate: tcp (%.4f, %.4f, %.4f) approach (%.3f, %.3f, %.3f) closed %.4f m",
-        target.point.x(), target.point.y(), target.point.z(),
-        approach.x(), approach.y(), approach.z(), target.closed_width);
-    } catch (const std::exception & error) {
-      RCLCPP_WARN(node_->get_logger(), "Ignoring grasp candidate: %s", error.what());
+    std::string reason = "no reachable roll variant";
+    int rejected = 0;
+    for (const auto & candidate : goal.grasp_candidates) {
+      if (candidate.tcp_pose.header.frame_id.empty()) {continue;}
+      const auto accepted = candidateTarget(candidate, object, displacement, &reason);
+      if (accepted) {return *accepted;}
+      ++rejected;
+    }
+    if (rejected > 0) {
+      RCLCPP_WARN(node_->get_logger(), "Ignoring %d grasp candidate(s): %s",
+        rejected, reason.c_str());
     }
     return target;
   }
 
-  // 滚转选择：立方体的开合轴四向等价，而腕关节限位对滚转非常敏感。
-  // 实测同一接近轴（20°）同一位置，roll 0° 返回 NO_IK_SOLUTION，而 90/180/270 均可解——
-  // 候选被拒的主因是滚转而非倾斜。取第一个预放置位可解的变体。
-  tf2::Quaternion selectReachableRoll(
-    const GraspTarget & grasp, const tf2::Vector3 & pick, const tf2::Vector3 & put)
+  // 放置侧的 IK 粗查：与 execute() 里的 pre_place / put 计算保持一致。
+  // 实测同一接近轴（20°）同一位置，roll 0° 返回 NO_IK_SOLUTION 而 90/180/270 均可解——
+  // 候选不可达的主因是滚转而非倾斜。预筛必须同时覆盖搬运平面与放置位本身：
+  // 只查 pre_place 时选中的 41° 候选仍会在完整预检里失败，浪费整次抓取。
+  bool placementReachable(const tf2::Quaternion & rotation, const tf2::Vector3 & pick,
+    const tf2::Vector3 & put)
   {
-    if (grasp.source != "graspnet") {return grasp.rotation;}
-    for (const double degrees : {0.0, 90.0, 180.0, 270.0}) {
-      tf2::Quaternion spin;
-      spin.setRPY(0.0, 0.0, degrees * M_PI / 180.0);
-      const auto rotation = (grasp.rotation * spin).normalized();
-      const auto approach = tf2::quatRotate(rotation, tf2::Vector3(0, 0, 1));
-      const auto cleared = pick - approach * lift_;
-      const auto pre_put = put - approach * retreat_;
-      const tf2::Vector3 pre_place(pre_put.x(), pre_put.y(),
-        std::max({transport_z_, cleared.z(), pre_put.z()}));
-      if (motion_->canReachPose(toolPose(pre_place, rotation, tool_to_tcp_, frame_))) {
-        if (degrees > 0.0) {
-          RCLCPP_INFO(node_->get_logger(), "Candidate roll %.0f deg is reachable; using it", degrees);
-        }
-        return rotation;
-      }
-    }
-    RCLCPP_WARN(node_->get_logger(), "No reachable roll variant; precheck will decide");
-    return grasp.rotation;
+    const auto approach = tf2::quatRotate(rotation, tf2::Vector3(0, 0, 1));
+    const auto cleared = pick - approach * lift_;
+    const auto pre_put = put - approach * retreat_;
+    const tf2::Vector3 pre_place(pre_put.x(), pre_put.y(),
+      std::max({transport_z_, cleared.z(), pre_put.z()}));
+    if (!motion_->canReachPose(toolPose(pre_place, rotation, tool_to_tcp_, frame_))) {return false;}
+    return motion_->canReachPose(toolPose(put, rotation, tool_to_tcp_, frame_));
   }
 
   bool interrupted(const std::shared_ptr<GoalHandle> & handle) const
   {
     return !rclcpp::ok() || handle->is_canceling();
+  }
+
+  void publishGraspComparison(const tf2::Vector3 & target, const tf2::Quaternion & rotation)
+  {
+    // 统一 RViz 轴定义：GraspNet +X 开合、+Z 接近；Piper link6 用 +Y 开合。
+    tf2::Quaternion display_basis;
+    display_basis.setRPY(0, 0, M_PI / 2.0);
+    auto selected = toolPose(target, (rotation * display_basis).normalized(), tf2::Vector3(0, 0, 0), frame_);
+    selected.header.stamp = node_->now();
+    target_tcp_pub_->publish(selected);
+    try {
+      const auto transform = tf_buffer_.lookupTransform(frame_, tool_frame_, tf2::TimePointZero);
+      tf2::Transform measured_tool;
+      tf2::fromMsg(transform.transform, measured_tool);
+      const auto measured = measured_tool * tool_to_tcp_;
+      const auto measured_rotation = measured_tool.getRotation().normalized();
+      auto actual = toolPose(measured, (measured_rotation * display_basis).normalized(),
+        tf2::Vector3(0, 0, 0), frame_);
+      actual.header.stamp = transform.header.stamp;
+      measured_tcp_pub_->publish(actual);
+      RCLCPP_INFO(node_->get_logger(), "Pre-close TCP tracking error: %.2f mm, %.2f deg",
+        (target - measured).length() * 1000.0, rotation.angleShortestPath(measured_rotation) * 180.0 / M_PI);
+    } catch (const tf2::TransformException & error) {
+      RCLCPP_WARN(node_->get_logger(), "Cannot measure pre-close TCP: %s", error.what());
+    }
   }
 
   void execute(const std::shared_ptr<GoalHandle> & handle)
@@ -502,12 +567,19 @@ private:
       }
       const auto object = inBase(goal->object_pose);
       const auto place = inBase(goal->place_pose);
-      const tf2::Vector3 put = tf2::Vector3(place.pose.position.x,
-        place.pose.position.y, place.pose.position.z + clearance_) + offset_;
+      // 保持物体姿态搬运时，夹持中心和物体中心具有相同的平移量。
+      const tf2::Vector3 displacement(place.pose.position.x - object.pose.position.x,
+        place.pose.position.y - object.pose.position.y,
+        place.pose.position.z - object.pose.position.z + clearance_);
       // 抓取姿态决定开合轴，因此物体投影宽度必须按抓取姿态算，不能固定用向下姿态。
-      auto grasp = resolveGrasp(*goal, object);
-      grasp.rotation = selectReachableRoll(grasp, grasp.point, put);
-      const double width = graspWidth(object.pose, goal->object_dimensions, grasp.rotation);
+      const auto grasp = resolveGrasp(*goal, object, displacement);
+      const auto put = grasp.point + displacement;
+      double width = graspWidth(object.pose, goal->object_dimensions, grasp.rotation);
+      if (width_worst_case_) {
+        // 取两种估计的较大值：姿态已知时不损失精度，未知时不会低估。
+        const auto opening = tf2::quatRotate(grasp.rotation, tf2::Vector3(0, 1, 0));
+        width = std::max(width, worstCaseWidth(goal->object_dimensions, opening));
+      }
       if (width >= open_width_) {
         throw std::runtime_error("Object is wider than configured gripper opening");
       }
@@ -579,6 +651,7 @@ private:
       precheck = Action::Result::PRECHECK_NONE;
       step("Move to pre-grasp", [&]() { return move(pre_pick, grasp.rotation, false); });
       step("Descend to grasp", [&]() { return move(pick, grasp.rotation, true); });
+      publishGraspComparison(pick, grasp.rotation);
       step("Close gripper", [&]() {
         // The MoveIt attachment is a planning model, not proof of a physical grasp.
         scene_->attach();
@@ -652,6 +725,7 @@ private:
   std::unique_ptr<Scene> scene_;
   std::mutex observations_mutex_;
   my_robot_interface::msg::DetectedObjectArray::ConstSharedPtr observations_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target_tcp_pub_, measured_tcp_pub_;
   rclcpp::Subscription<my_robot_interface::msg::DetectedObjectArray>::SharedPtr objects_sub_;
   rclcpp::CallbackGroup::SharedPtr recovery_group_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr release_service_;
@@ -669,6 +743,7 @@ private:
   double candidate_max_tilt_deg_;
   double candidate_max_offset_;
   bool candidate_centre_snap_;
+  bool width_worst_case_;
   std::vector<double> signs_;
   double approach_, lift_, transport_z_, clearance_, retreat_;
   double open_width_, grasp_width_, compression_, release_margin_, max_age_, tf_timeout_;

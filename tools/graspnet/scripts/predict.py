@@ -79,14 +79,17 @@ def postprocess(group, scene, params, detector):
                 width_filtered=width_filtered)
 
 
-def evaluate_stage(array, matrix, targets, tol):
+def evaluate_stage(array, matrix, targets, tol, top_k=1):
     positions = array[:, 13:16] @ matrix[:3, :3].T + matrix[:3, 3]
     attribution = {}
     for body in targets:
         ranks = np.flatnonzero(np.all(np.abs(positions - body['center']) <= tol, axis=1))
         attribution[body['body']] = dict(top1=bool(len(ranks) and ranks[0] == 0),
                                        top5=bool(len(ranks) and ranks[0] < 5),
-                                       best_rank=int(ranks[0]) if len(ranks) else None)
+                                       best_rank=int(ranks[0]) if len(ranks) else None,
+                                       # 同一目标的前 K 个归属候选（array 已按 score 降序）：
+                                       # top-1 常常偏心或腕部不可达，执行端需要备选。
+                                       best_ranks=[int(r) for r in ranks[:max(1, top_k)]])
     rotations = matrix[:3, :3] @ array[:, 4:13].reshape(-1, 3, 3)
     candidates = [dict(rank=i, reference_position_base=positions[i].tolist(),
                        reference_rotation_base=rotations[i].tolist(),
@@ -99,15 +102,13 @@ def evaluate_stage(array, matrix, targets, tol):
     # 抓取坐标系：+z=接近轴（R 第 0 列）、+x=开合轴（第 1 列）、+y=第 2 列（右手系保持）。
     proposals = []
     for body in targets:
-        rank = attribution[body['body']]['best_rank']
-        if rank is None:
-            continue
-        grasp_frame = np.stack([rotations[rank][:, 1], rotations[rank][:, 2],
-                                rotations[rank][:, 0]], axis=1)
-        proposals.append(dict(body=body['body'], rank=int(rank),
-                              position=positions[rank].tolist(),
-                              quaternion=Rotation.from_matrix(grasp_frame).as_quat().tolist(),
-                              width=float(array[rank, 1]), score=float(array[rank, 0])))
+        for rank in attribution[body['body']]['best_ranks']:
+            grasp_frame = np.stack([rotations[rank][:, 1], rotations[rank][:, 2],
+                                    rotations[rank][:, 0]], axis=1)
+            proposals.append(dict(body=body['body'], rank=int(rank),
+                                  position=positions[rank].tolist(),
+                                  quaternion=Rotation.from_matrix(grasp_frame).as_quat().tolist(),
+                                  width=float(array[rank, 1]), score=float(array[rank, 0])))
     return dict(attribution=attribution, candidates_top=candidates, proposals=proposals,
                 width_mm=dict(min=float(widths.min()) if len(array) else None,
                               med=float(np.median(widths)) if len(array) else None,
@@ -145,6 +146,8 @@ def main():
                         help='行式候选输出（ITEM/BEST，供 ROS 节点零依赖解析）；'
                              '姿态取 after_nms 阶段，参考点语义同 meta 说明')
     parser.add_argument('--weights', default=str(BASE/'models/artifacts/checkpoint-rs.tar'))
+    parser.add_argument('--top-k', type=int, default=1, dest='top_k',
+                       help='每个目标输出前 K 个归属候选（BEST 行）；ROS 节点用它做候选内选择')
     args = parser.parse_args()
     if not Path(args.weights).is_file():
         parser.error('Weights missing; see tools/graspnet/models/README.md or pass --weights')
@@ -227,7 +230,8 @@ def main():
             scene = full[rng_cloud.choice(len(full), count, replace=False)]
         arrays = postprocess(group, scene, params, detector)
         stages = {stage: evaluate_stage(arrays[stage], matrix, item['targets'],
-                                       params.get('attrib_tol_m', .02)) for stage in STAGES}
+                                       params.get('attrib_tol_m', .02), args.top_k)
+                  for stage in STAGES}
         post_ms = (time.perf_counter()-t0)*1000
         array_path = arrays_dir/f'{index:05d}.npz'
         # Preserve every candidate at native precision, full rotations and source transform.

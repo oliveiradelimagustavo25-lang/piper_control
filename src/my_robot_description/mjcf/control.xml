@@ -6,10 +6,13 @@
   <!-- The fixed base and first link overlap at their joint in the source mesh. -->
   <contact><exclude body1="base_link" body2="link1"/></contact>
   <actuator>
-    <!-- Initial simulation gains; tune them using measured tracking behavior. -->
+    <!-- Initial simulation gains; tune them using measured tracking behavior.
+         2026-11-18 joint2/joint3 300 -> 800：kp=300 时重力下垂使 TCP 稳态偏差约 3.8 mm，
+         夹爪闭合同样把物体推走 3.8 mm（实测 10 样本）。dampratio=1 会随 kp 自动提高 kv，
+         仍保持临界阻尼。实测 3 轮 12/12：抓取推动 3.79 -> 0.84 mm，放置偏差中位 7.23 -> 2.48 mm。 -->
     <position name="joint1" joint="joint1" kp="300" dampratio="1" ctrlrange="-2.618 2.618"/>
-    <position name="joint2" joint="joint2" kp="300" dampratio="1" ctrlrange="0 3.14"/>
-    <position name="joint3" joint="joint3" kp="300" dampratio="1" ctrlrange="-2.967 0"/>
+    <position name="joint2" joint="joint2" kp="800" dampratio="1" ctrlrange="0 3.14"/>
+    <position name="joint3" joint="joint3" kp="800" dampratio="1" ctrlrange="-2.967 0"/>
     <position name="joint4" joint="joint4" kp="80" dampratio="1" ctrlrange="-1.745 1.745"/>
     <position name="joint5" joint="joint5" kp="80" dampratio="1" ctrlrange="-1.22 1.22"/>
     <position name="joint6" joint="joint6" kp="40" dampratio="1" ctrlrange="-2.0944 2.0944"/>
